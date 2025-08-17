@@ -54,6 +54,9 @@ type ApplyMsg struct {
 
 const (
 	HeartBeatInterval = 100 * time.Millisecond
+	// The tester generously allows solutions to complete elections in one second
+	// (much more than the paper's range of timeouts).
+	RaftElectionTimeout = 1000 * time.Millisecond
 )
 
 type Role int
@@ -187,6 +190,8 @@ func (rf *Raft) readPersist(raftstate []byte, snapstate []byte) {
 		rf.LastIncludedTerm = lastIncludedTerm
 		rf.LastIncludedIndex = lastIncludedIndex
 		rf.SnapshotState = snapshot
+		// commit after snapshot will use commitIndex
+		rf.commitIndex = lastIncludedIndex
 	} else {
 		DPrintf("snapshot doesn't exist or decoded failure\n")
 	}
@@ -387,7 +392,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 	}
 
 	if rf.role != Leader || !ok {
-		DPrintf("reply timeout, from peer: %v, Xterm: %v, Xindex: %v", server, reply.Xterm, reply.Xindex)
+		// DPrintf("reply timeout, from peer: %v, Xterm: %v, Xindex: %v", server, reply.Xterm, reply.Xindex)
 		return
 	}
 
@@ -427,6 +432,13 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 							CommandIndex: commitedInd,
 						})
 					}
+
+					// Add an invalid command to ensure Snapshot must has been applied before the next AppendEntries RPC.
+					msgs = append(msgs, ApplyMsg{
+						CommandValid: false,
+						Command:      nil,
+						CommandIndex: -2,
+					})
 					// send ApplyMsg to applyCh for tester
 					// copy msgs first, then apply msgs to applyCh. Cause we might trigger snapshoting and trim the log when we're applying the msgs.
 					// must process it during lock to avoid out of order apply by another RPC.
@@ -444,21 +456,35 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 		}
 		DPrintf("check commitIndex done, leader:%v, matchIndex: %v", rf.me, rf.matchIndex)
 	} else if reply.Xterm != -2 {
-		DPrintf("reply mismatch, from peer: %v, Xterm: %v, Xindex: %v, myLastIncIdx:%v", server, reply.Xterm, reply.Xindex, rf.LastIncludedIndex)
+		DPrintf("reply mismatch, from peer: %v, Xterm: %v, Xindex: %v, prevIdx:%v, prevTerm:%v, myLastIncIdx:%v", server, reply.Xterm, reply.Xindex, args.PrevLogIndex, args.PrevLogTerm, rf.LastIncludedIndex)
 		// Although, ok is true and reply.Success is false, we still have to check Xterm!=-2, cause RPC might early return our response before the reply is fully set in requestAppendEntries.
 		// If AppendEntries fails because of log inconsistency, do quick recovery.
 		// Must be ok, or it'll reset nextIndex if timeout due to the target peer is disconnected.
 		if reply.Xterm == -1 {
 			// skip to follower's index
+			if rf.nextIndex[server] < reply.Xindex { // drop late rpc, failed requestAppendEntries RPC will only decrease the nextIndex, so we can safely ignore it
+				return
+			}
 			rf.nextIndex[server] = reply.Xindex
-		} else { // conflicting, args.PrevLogIndex == reply.Xindex always true
-			if reply.Xindex == rf.LastIncludedIndex { // conflicting with snapshot index; prevLogIndex >= rf.lastIncludedIndex is always true. So, we don't need to check reply.Xindex < rf.LastIncludedIndex
+			fmt.Println("peer:", server, ",skip to addIndex:", rf.nextIndex[server])
+		} else { // conflicting, args.PrevLogIndex == reply.Xindex not always true.
+			// TODO:Merge this case with reply.Xterm == -1
+			if rf.nextIndex[server] < reply.Xindex { // drop late rpc
+				return
+			}
+			if reply.Xindex <= rf.LastIncludedIndex { // conflicting with snapshot index;
 				rf.nextIndex[server] = max(rf.LastIncludedIndex, 0) // if lastIncludedIndex is -1, then nextIndex should be 0
+				fmt.Println("peer:", server, ",skip to LastIncludedIndex:", rf.nextIndex[server])
 				return
 			}
 			// skip to leader's last index of previous term before snapshot index
-			for i := args.PrevLogIndex; i >= rf.LastIncludedIndex; i-- {
-				if rf.Log[i-rf.LastIncludedIndex-1].Term != args.PrevLogTerm || i == rf.LastIncludedIndex {
+			for i := min(args.PrevLogIndex, reply.Xindex); i >= rf.LastIncludedIndex; i-- {
+				if i == rf.LastIncludedIndex || rf.Log[i-rf.LastIncludedIndex-1].Term < min(reply.Xterm, args.PrevLogTerm) {
+					term := -1
+					if i > rf.LastIncludedIndex {
+						term = rf.Log[i-rf.LastIncludedIndex-1].Term
+					}
+					fmt.Println("peer:", server, ",skip to prevLogIndex:", i, "term:", term)
 					rf.nextIndex[server] = i + 1
 					return
 				}
@@ -491,11 +517,11 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 	reply.Xindex = -1
 	reply.Xterm = -2
 
-	// cond:1， args.PrevLogIndex < rf.commitIndex should be happen, rejected the leader rule force leader's log must be at least longer than the follower; If this happen, we might receive old RPC.
-	// Use rf.commitIndex to check prevLogIndex rather than rf.LastIncludedIndex, because:
-	// 	  rf.commitIndex >= rf.LastIncludedIndex is always true; we can use this check to avoid this race condition:
+	// cond:1， args.PrevLogIndex < rf.commitIndex could happend when no snapshot. In snapshot case, we might receive old RPC. We can't use args.PrevLogIndex < rf.commitIndex to check, because in no snapshot case, we might rollback to a too old log to quickly sync the peer's log with leader.
+	//  To avoid this race condition:
 	// 			appendEnriesRPC A -> commit during A with index 58 => appendRPC B with LastIncludedIndex=50 => Snapshot called trigged by RPC A => commit during RPC B (LastIncludedIndex changed to 58)
-	if args.Term < rf.CurrentTerm || args.PrevLogIndex < rf.commitIndex {
+	// We must ensure snapshot is done before the next AppendEntries RPC, so we add an invalid command to applyCh.
+	if args.Term < rf.CurrentTerm || args.PrevLogIndex < rf.LastIncludedIndex {
 		return
 	}
 
@@ -514,6 +540,9 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 		// check if prevLogIndex is in the log, not exist
 		if args.PrevLogIndex > len(rf.Log)+rf.LastIncludedIndex {
 			reply.Xterm = -1
+			if len(rf.Log) > 0 {
+				reply.Xterm = rf.Log[len(rf.Log)-1].Term // the last term in the log
+			}
 			reply.Xindex = len(rf.Log) + rf.LastIncludedIndex + 1
 
 			rf.persist()
@@ -522,7 +551,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 		// prevLogIndex > rf.LastIncludedIndex has been ensured before in cond:1;
 		// prevLogIndex != rf.LastIncludedIndex has been ensured before in cond:2
 		relativeLogIndex := args.PrevLogIndex - rf.LastIncludedIndex - 1
-		if rf.Log[relativeLogIndex].Term != args.PrevLogTerm {
+		if relativeLogIndex >= 0 && rf.Log[relativeLogIndex].Term != args.PrevLogTerm {
 			// log mismatch, return false
 			reply.Xterm = rf.Log[relativeLogIndex].Term
 			reply.Xindex = args.PrevLogIndex // should be absolute index rather than relative index
@@ -559,7 +588,8 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 		commitIndex := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 		// Send ApplyMsg for each new committed log entry for tester
 		msgs := []ApplyMsg{}
-		for i := rf.LastIncludedIndex + 1; i <= commitIndex; i++ {
+		// Must start from commitIndex, or we'll commit the same index multiple times.
+		for i := rf.commitIndex + 1; i <= commitIndex; i++ {
 			relativeIndex := i - rf.LastIncludedIndex - 1
 			cmd := rf.Log[relativeIndex].Cmd
 			commitedInd := logIndexToApplyChIndex(i)
@@ -571,11 +601,19 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 			})
 		}
 
+		// Snapshot is async and we can't add lock to Snapshot func, because it'll cause deadlock when applyCh hasn't done. So, we add an invalid command to ensure Snapshot must has been applied before the next AppendEntries RPC.
+		msgs = append(msgs, ApplyMsg{
+			CommandValid: false,
+			Command:      nil,
+			CommandIndex: -2,
+		})
+
 		// must block to avoid out of order apply
 		for _, msg := range msgs {
+			DPrintf("follower:%v, apply msg, applyCmd: %v, cmdIndex: %v, valid:%v", rf.me, msg.Command, msg.CommandIndex, msg.CommandValid)
 			rf.applyCh <- msg
-			DPrintf("follower:%v, apply msg, applyCmd: %v, cmdIndex: %v", rf.me, msg.Command, msg.CommandIndex)
 		}
+
 		DPrintf("follower:%v,  set commit index: %v", rf.me, logIndexToApplyChIndex(commitIndex))
 		rf.commitIndex = commitIndex
 	}
@@ -764,6 +802,8 @@ func (rf *Raft) _sendHeartBeats() {
 		return
 	}
 	rf.lastLive = time.Now()
+	// also update the server's nextIndex for debugging purposes
+	rf.matchIndex[rf.me] = len(rf.Log) + rf.LastIncludedIndex
 
 	// send heartbeat
 	emptyEntry := RequestAppendEntry{
