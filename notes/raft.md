@@ -106,8 +106,16 @@ sendAppendEntries:
 比较困难的地方在于，理解CondSnapshot和SnapShot()何时被调用以及参数的含义：
 - 这两个函数都是在函数运行过程中，接收到想用的ApplyMsg channel之后，会被cfg自动调用，所以不能设置lock，否则直接死锁
 - Snapshot中传入的index是cmd index，而实际记录的是logIndex需要进行转换
+    - Snapshot是异步调用的，并且不能加锁(否则有可能在applyCh中trigger snapshot导致死锁)，所以需要特殊处理下，增加一个invalidCmd，确保Snapshot在当前RPC中被处理完
 - CondInstallSnapshot时需要确保如下两个事情之一:
     - 确认自己是follower
     - 不检查自己是不是follower，但不要trim所有的log，因为有可能收到old RequestInstallSnapShot的RPC，此时自己已经是leader了，如果直接把log置nil，会导致len(rf.Log) < nextIndex[server]
 
 还有就是需要特殊处理下appendEntries时，previousLogIndex==rf.lastIncudedIndex，这种情况不需要处理，此时previousLog一定不会conflict，因为该snapshot一定是由marjority确认后，leader才会commit，进而传给follower做snapshot
+
+
+## 3A
+- 需要注意server和follower共用一套代码，代码上需要进行合理的区分
+    - 只有leader需要reply
+    - 但是leader和follower都需要有状态
+- 2021年的3A测试文件有问题，会导致linearizability测试不通过，需要换成2020年的

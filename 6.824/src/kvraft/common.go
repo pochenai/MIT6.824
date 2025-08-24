@@ -4,30 +4,31 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrRetry       = "ErrRetry"
 )
 
 type Err string
+type Operation int
 
-// Put or Append
-type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
+const (
+	OpGet Operation = iota
+	OpPut
+	OpAppend
+)
+
+type ReqArg struct {
+	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key   string
+	Value string
+	Op    Operation // "Get", "Put", or "Append"
+	Cid   int64     // client id
+	Seq   int64     // sequence number
 }
 
-type PutAppendReply struct {
-	Err Err
-}
-
-type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
-}
-
-type GetReply struct {
+type Reply struct {
 	Err   Err
 	Value string
+	Term  int
 }

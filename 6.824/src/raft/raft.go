@@ -466,7 +466,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 				return
 			}
 			rf.nextIndex[server] = reply.Xindex
-			fmt.Println("peer:", server, ",skip to addIndex:", rf.nextIndex[server])
+			// fmt.Println("peer:", server, ",skip to addIndex:", rf.nextIndex[server])
 		} else { // conflicting, args.PrevLogIndex == reply.Xindex not always true.
 			// TODO:Merge this case with reply.Xterm == -1
 			if rf.nextIndex[server] < reply.Xindex { // drop late rpc
@@ -474,17 +474,12 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 			}
 			if reply.Xindex <= rf.LastIncludedIndex { // conflicting with snapshot index;
 				rf.nextIndex[server] = max(rf.LastIncludedIndex, 0) // if lastIncludedIndex is -1, then nextIndex should be 0
-				fmt.Println("peer:", server, ",skip to LastIncludedIndex:", rf.nextIndex[server])
+				// fmt.Println("peer:", server, ",skip to LastIncludedIndex:", rf.nextIndex[server])
 				return
 			}
 			// skip to leader's last index of previous term before snapshot index
 			for i := min(args.PrevLogIndex, reply.Xindex); i >= rf.LastIncludedIndex; i-- {
 				if i == rf.LastIncludedIndex || rf.Log[i-rf.LastIncludedIndex-1].Term < min(reply.Xterm, args.PrevLogTerm) {
-					term := -1
-					if i > rf.LastIncludedIndex {
-						term = rf.Log[i-rf.LastIncludedIndex-1].Term
-					}
-					fmt.Println("peer:", server, ",skip to prevLogIndex:", i, "term:", term)
 					rf.nextIndex[server] = i + 1
 					return
 				}
