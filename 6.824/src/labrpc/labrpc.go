@@ -49,15 +49,19 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.824/labgob"
-import "bytes"
-import "reflect"
-import "sync"
-import "log"
-import "strings"
-import "math/rand"
-import "time"
-import "sync/atomic"
+import (
+	"bytes"
+	"context"
+	"log"
+	"math/rand"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"6.824/labgob"
+)
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -235,10 +239,17 @@ func (rn *Network) processReq(req reqMsg) {
 		// in a separate thread so that we can periodically check
 		// if the server has been killed and the RPC should get a
 		// failure reply.
-		ech := make(chan replyMsg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		ech := make(chan replyMsg, 1)
 		go func() {
 			r := server.dispatch(req)
-			ech <- r
+			select {
+			case ech <- r:
+			case <-ctx.Done():
+				return
+			}
 		}()
 
 		// wait for handler to return,
@@ -255,7 +266,8 @@ func (rn *Network) processReq(req reqMsg) {
 				serverDead = rn.isServerDead(req.endname, servername, server)
 				if serverDead {
 					go func() {
-						<-ech // drain channel to let the goroutine created earlier terminate
+						// <-ech // drain channel to let the goroutine created earlier terminate
+						cancel() // can't use <-ech to drain, beacause if ech <- r hasn't been created, if will be blocked.
 					}()
 				}
 			}
@@ -379,11 +391,9 @@ func (rn *Network) GetTotalBytes() int64 {
 	return x
 }
 
-//
 // a server is a collection of services, all sharing
 // the same rpc dispatcher. so that e.g. both a Raft
 // and a k/v server can listen to the same rpc endpoint.
-//
 type Server struct {
 	mu       sync.Mutex
 	services map[string]*Service

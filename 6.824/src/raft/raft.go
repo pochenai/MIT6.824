@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 	"bytes"
+	"context"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -44,6 +45,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	LeaderId     int
 
 	// For 2D:
 	SnapshotValid bool
@@ -93,6 +95,8 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -138,6 +142,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Log)
+	e.Encode(rf.LastIncludedTerm)
+	e.Encode(rf.LastIncludedIndex)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -148,20 +154,15 @@ func (rf *Raft) persistSnapShot() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Log)
-	state := w.Bytes()
-
-	w = new(bytes.Buffer)
-	e = labgob.NewEncoder(w)
 	e.Encode(rf.LastIncludedTerm)
 	e.Encode(rf.LastIncludedIndex)
-	e.Encode(rf.SnapshotState)
-	snapshot := w.Bytes()
+	state := w.Bytes()
 
-	rf.persister.SaveStateAndSnapshot(state, snapshot)
+	rf.persister.SaveStateAndSnapshot(state, rf.SnapshotState)
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(raftstate []byte, snapstate []byte) {
+func (rf *Raft) readPersist(raftstate []byte, statesnapshot []byte) {
 	if raftstate == nil || len(raftstate) < 1 { // bootstrap without any state?
 		return
 	}
@@ -172,30 +173,22 @@ func (rf *Raft) readPersist(raftstate []byte, snapstate []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []Log
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+	var lastIncludedTerm int
+	var lastIncludedIndex int
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil || d.Decode(&lastIncludedTerm) != nil || d.Decode(&lastIncludedIndex) != nil {
 		panic("readPersist decode error")
 	} else {
 		rf.CurrentTerm = currentTerm
 		rf.VotedFor = votedFor
 		rf.Log = log
-	}
-
-	// snapshot
-	rs := bytes.NewBuffer(snapstate)
-	ds := labgob.NewDecoder(rs)
-	var lastIncludedTerm int
-	var lastIncludedIndex int
-	var snapshot []byte
-	if ds.Decode(&lastIncludedTerm) == nil && ds.Decode(&lastIncludedIndex) == nil && ds.Decode(&snapshot) == nil {
 		rf.LastIncludedTerm = lastIncludedTerm
 		rf.LastIncludedIndex = lastIncludedIndex
-		rf.SnapshotState = snapshot
-		// commit after snapshot will use commitIndex
-		rf.commitIndex = lastIncludedIndex
-	} else {
-		DPrintf("snapshot doesn't exist or decoded failure\n")
+		// also include this line to avoid relativeIndex <0 in requestAppendRPC( relativeIndex := i - rf.LastIncludedIndex - 1)
+		rf.commitIndex = rf.LastIncludedIndex
 	}
 
+	// Must intialized snapshot after crash recovery, otherwise RequestInstallSnapshot will send empty snapshot, which panics the if len(msg.Snapshot) < 1 check in kvraft.server
+	rf.SnapshotState = statesnapshot
 }
 
 type RequestInstallSnapshot struct {
@@ -255,18 +248,38 @@ func (rf *Raft) RequestInstallSnapshot(args *RequestInstallSnapshot, reply *Inst
 		rf.VotedFor = -1
 	}
 
+	// update commitIndex immediately rather than set it later in CondInstallSnapshot for requestAppendEntries to drop old RPCs.
+	rf.commitIndex = args.LastIncludedIndex
+
 	// Only deal with this RPC when we're the follower or candicate, otherwise ignore it. Cause we might receive old RPC request.
 	// This msg will insert a log at cmdIndex to ensure checklog pass (the previous log is the same with other servers) when applying the next entry in the future.
-	rf.applyCh <- ApplyMsg{
+	msgs := []ApplyMsg{}
+	msgs = append(msgs, ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: logIndexToApplyChIndex(args.LastIncludedIndex),
-	}
+		LeaderId:      args.LeaderID,
+	})
 	DPrintf("peer %v, applySnapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
 
-	// update commitIndex immediately rather than set it later in CondInstallSnapshot for requestAppendEntries to drop old RPCs.
-	rf.commitIndex = args.LastIncludedIndex
+	// Add dummy applyMsg to make sure Snapshot is installed before this RPC.
+	msgs = append(msgs, ApplyMsg{
+		CommandValid: false,
+		Command:      nil,
+		CommandIndex: -2,
+		LeaderId:     args.LeaderID,
+	})
+
+	for _, msg := range msgs {
+		select {
+		case rf.applyCh <- msg:
+			continue
+		case <-rf.ctx.Done(): // to avoid goroutine memory leak
+			return
+		}
+	}
+
 	reply.Success = true
 }
 
@@ -313,6 +326,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedCmdIndex i
 	rf.Log = rf.Log[logIndex:] // min is len(rf.Log) not len(rf.Log) -1 !, cause we'll trim all the log when lastIncludedLogIndex is larger; else we'll leave some log. Cause requestAppendEntries can check the conflicting log.
 	rf.LastIncludedIndex = lastIncludedLogIndex
 	rf.LastIncludedTerm = lastIncludedTerm
+	// also update commit index to avoid relativeLogIndex <0 in requestAppendRPC ( relativeIndex := i(commitIndex+1) - rf.LastIncludedIndex - 1)
+	rf.commitIndex = lastIncludedLogIndex
 	DPrintf("server %v, condInstall snapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
 	rf.persistSnapShot()
 
@@ -430,6 +445,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 							CommandValid: true,
 							Command:      cmd,
 							CommandIndex: commitedInd,
+							LeaderId:     rf.me,
 						})
 					}
 
@@ -438,16 +454,21 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 						CommandValid: false,
 						Command:      nil,
 						CommandIndex: -2,
+						LeaderId:     rf.me,
 					})
 					// send ApplyMsg to applyCh for tester
 					// copy msgs first, then apply msgs to applyCh. Cause we might trigger snapshoting and trim the log when we're applying the msgs.
 					// must process it during lock to avoid out of order apply by another RPC.
-					for _, msg := range msgs {
-						rf.applyCh <- msg
-					}
-
-					rf.commitIndex = i
+					rf.commitIndex = i // must set it before applyCh to avoid rf.killed cause earlier return
 					DPrintf("leader %v, set commit index: %v", rf.me, logIndexToApplyChIndex(i))
+					for _, msg := range msgs {
+						select {
+						case rf.applyCh <- msg:
+							continue
+						case <-rf.ctx.Done(): // to avoid goroutine memory leak
+							return
+						}
+					}
 					// Allservers: update lastApplied and apply log[lastApplied] to state machine
 					// todo
 					break
@@ -516,7 +537,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 	//  To avoid this race condition:
 	// 			appendEnriesRPC A -> commit during A with index 58 => appendRPC B with LastIncludedIndex=50 => Snapshot called trigged by RPC A => commit during RPC B (LastIncludedIndex changed to 58)
 	// We must ensure snapshot is done before the next AppendEntries RPC, so we add an invalid command to applyCh.
-	if args.Term < rf.CurrentTerm || args.PrevLogIndex < rf.LastIncludedIndex {
+	if args.Term < rf.CurrentTerm || args.PrevLogIndex < rf.LastIncludedIndex || args.LeaderCommit < rf.LastIncludedIndex {
 		return
 	}
 
@@ -593,6 +614,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 				CommandValid: true,
 				Command:      cmd,
 				CommandIndex: commitedInd,
+				LeaderId:     args.LeaderId,
 			})
 		}
 
@@ -601,16 +623,21 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 			CommandValid: false,
 			Command:      nil,
 			CommandIndex: -2,
+			LeaderId:     args.LeaderId,
 		})
-
+		DPrintf("follower:%v,  set commit index: %v", rf.me, logIndexToApplyChIndex(commitIndex))
+		// must set it before applyCh to avoid rf.killed cause earlier return
+		rf.commitIndex = commitIndex
 		// must block to avoid out of order apply
 		for _, msg := range msgs {
-			DPrintf("follower:%v, apply msg, applyCmd: %v, cmdIndex: %v, valid:%v", rf.me, msg.Command, msg.CommandIndex, msg.CommandValid)
-			rf.applyCh <- msg
+			select {
+			case rf.applyCh <- msg:
+				DPrintf("follower:%v, apply msg, applyCmd: %v, cmdIndex: %v, valid:%v", rf.me, msg.Command, msg.CommandIndex, msg.CommandValid)
+				continue
+			case <-rf.ctx.Done(): // to avoid goroutine memory leak
+				return
+			}
 		}
-
-		DPrintf("follower:%v,  set commit index: %v", rf.me, logIndexToApplyChIndex(commitIndex))
-		rf.commitIndex = commitIndex
 	}
 	// TODO: Allservers update lastApplied and apply log[lastApplied] to state machine
 	DPrintf("leader:%v, RequestAppendEntries success in peer: %v,prevIndex:%v,prevTerm:%v, prevCommit:%v,leaderTerm:%v,entries:%v,under mycommitIndex: %v, myterm: %v, myLog: %v", args.LeaderId, rf.me, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, len(args.Entries), rf.commitIndex, rf.CurrentTerm, len(rf.Log))
@@ -778,6 +805,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.cancel()
 }
 
 func (rf *Raft) killed() bool {
@@ -1009,7 +1037,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
+	ctx, cancel := context.WithCancel(context.Background())
+	rf.ctx = ctx
+	rf.cancel = cancel
 	// Your initialization code here (2A, 2B, 2C).
 	// 2A
 	rf.VotedFor = -1
