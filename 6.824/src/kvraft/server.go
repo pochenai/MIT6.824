@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -30,51 +31,83 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	done      chan int
 	state     map[string]string
-	msgSeq    map[int64]int64 // map from command index to sequence
-	pendingCh map[int]chan int
+	msgSeq    map[int64]int64 // map from clientId to max requestId
+	pendingCh map[int]chan Result
+	persister *raft.Persister
 }
 
 func (kv *KVServer) applyCmds() {
-	for msg := range kv.applyCh {
-		if !msg.CommandValid { // Must skip this due to invalid command used to ensure snapshot is processed during raft RPC.
-			continue
-		}
-		msg := msg
-
-		kv.mu.Lock() // lock first to avoid concurrent map read/write and ensure lineariability
-		op := msg.Command.(ReqArg)
-		// leader and follower both have state, don't forget to set follower's state
-		if op.Seq > kv.msgSeq[op.Cid] {
-			kv.msgSeq[op.Cid] = op.Seq
-			switch op.Op {
-			case OpPut:
-				kv.state[op.Key] = op.Value
-			case OpAppend:
-				kv.state[op.Key] += op.Value
+	for !kv.killed() {
+		select {
+		case msg := <-kv.applyCh:
+			if !msg.CommandValid && !msg.SnapshotValid { // Must skip this due to invalid command used to ensure snapshot is processed during raft RPC.
+				continue
 			}
-		}
-		kv.mu.Unlock()
 
-		// Must use goroutine to avoid deadlock:
-		// case 1:kv.lock wait rf.lock
-		// 			- PutAppendCmd => kv.lock wait rf.lock
-		// 			- then applyCh came (it has acquired rf.lock) and wait kv.lock, but kv.lock is held by PutAppendCmd
-		// 			- So deadlock happens.
-		// case 2: rf.GetState trys to get lock during applyCh which still holds the lock
-		go func() {
-			// Be aware server and follower use the same code, so check exists to make sure only leader has this channel
-			if _, isLeader := kv.rf.GetState(); isLeader {
-				kv.mu.Lock()
-				// Use lock to ensure pendingCh is created before applyCh or server would get stuck in <-kv.pendingCh[cmdIndex] during Get/PutAppend
-				if _, exists := kv.pendingCh[msg.CommandIndex]; !exists {
-					kv.pendingCh[msg.CommandIndex] = make(chan int, 1)
+			DPrintf("peer %v receive applyCh: %v, isSnapshot:%v", kv.me, msg.CommandIndex, msg.SnapshotValid)
+			kv.mu.Lock() // lock first to avoid concurrent map read/write and ensure lineariability
+			if msg.SnapshotValid {
+				if len(msg.Snapshot) < 1 {
+					panic("snapshot is nil")
 				}
-				// send ch in lock to avoid concurrent map read/write
-				kv.pendingCh[msg.CommandIndex] <- 0
+				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+					kv.restoreState(msg.Snapshot) // write kv.msgSeq, so it also should be locked
+				}
 				kv.mu.Unlock()
+				continue
 			}
-		}()
+
+			var result Result
+			op := msg.Command.(ReqArg)
+			// leader and follower both have state, don't forget to set follower's state
+			if op.Seq > kv.msgSeq[op.Cid] {
+				kv.msgSeq[op.Cid] = op.Seq
+				switch op.Op {
+				case OpPut:
+					kv.state[op.Key] = op.Value
+				case OpAppend:
+					kv.state[op.Key] += op.Value
+				}
+			}
+
+			// To avoid concurrent map read/write, we set result in lock.
+			result.Value = kv.state[op.Key]
+			result.Cid = op.Cid
+			result.Seq = op.Seq
+			kv.mu.Unlock()
+
+			// save state snapshot
+			s := kv.persister.RaftStateSize()
+			if s > kv.maxraftstate && kv.maxraftstate != -1 {
+				DPrintf("peer:%d, start persisting snapshot, size:%d, cmdInd:%d", kv.me, s, msg.CommandIndex)
+				kv.rf.Snapshot(msg.CommandIndex, kv.snapshot())
+			}
+
+			DPrintf("peer:%d, start sending applyCh, cmdInd:%d, isLeader:%v", kv.me, msg.CommandIndex, msg.LeaderId == kv.me)
+			kv.mu.RLock()
+			// use msg.LeaderId == kv.me (or can use lastTerm + isleader to check if term has changed) to check if is leader rather than set kv.isLeader than check use kv.isLeader. Or if the leader is stale, it might not realized it's not leader anymore, so there will be many unhandled ch, which cause memory leaks.
+			if msg.LeaderId == kv.me { // Be aware server and follower use the same code, so check exists to make sure only leader has this channel
+				// Use lock to ensure pendingCh is created before applyCh or server would get stuck in <-kv.pendingCh[cmdIndex] during Get/PutAppend
+				ch, exists := kv.pendingCh[msg.CommandIndex]
+				// we only send result if there is already a channel, or we don't send because there might be no handlers (due to new leader commit old leader's msg) for this applyCh , which might cause memory leak or deadlock.s
+				if exists {
+					DPrintf("leader %v sending ch", kv.me)
+					ch <- result
+				}
+			}
+			kv.mu.RUnlock()
+
+			// Or could use goroutine to avoid deadlock, but this way may face linearizability error(because this applyCh might be send to other Request handler):
+			// case 1:kv.lock wait rf.lock
+			// 			- PutAppendCmd => kv.lock wait rf.lock
+			// 			- then applyCh came (it has acquired rf.lock) and wait kv.lock, but kv.lock is held by PutAppendCmd
+			// 			- So deadlock happens.
+			// case 2: rf.GetState trys to get lock during applyCh which still holds the lock Request handler
+		case <-kv.done: // add this case to avoid memory leak, when kv is killed but the go routine is stucked at msg := <-kv.applyCh and can't return
+			return
+		}
 
 	}
 }
@@ -82,49 +115,55 @@ func (kv *KVServer) applyCmds() {
 func (kv *KVServer) Request(args *ReqArg, reply *Reply) {
 	// Your code here.
 	kv.mu.RLock()
+	// For lineariazability, we don't allow old PUT/Append execute twice. Get is ok.
+	// Acturally some seq less than this might not be handled.
 	if args.Seq <= kv.msgSeq[args.Cid] {
-		if args.Op == OpGet {
-			reply.Value = kv.state[args.Key]
-		}
+		reply.Value = kv.state[args.Key]
 		kv.mu.RUnlock()
 		return
 	}
 	kv.mu.RUnlock()
 
 	cmdIndex, term, isleader := kv.rf.Start(*args)
-	// fmt.Println("peer:", kv.me, "Receive Get:", "key:", len(args.Key))
 	reply.Term = term
 	if !isleader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-
+	DPrintf("leader:%v start apply cmd:%v", kv.me, cmdIndex)
 	kv.mu.Lock()
-	var ch chan int
+	var ch chan Result
 	// Use lock to ensure pendingCh is created first before applyCh or server might get stuck in select <-ch during Get/PutAppend
 	if _, exists := kv.pendingCh[cmdIndex]; !exists {
-		kv.pendingCh[cmdIndex] = make(chan int, 1)
+		kv.pendingCh[cmdIndex] = make(chan Result)
 	}
 	ch = kv.pendingCh[cmdIndex]
 	kv.mu.Unlock()
+	DPrintf("leader:%v waiting for cmd:%v", kv.me, cmdIndex)
 
 	select {
-	case <-ch:
-		kv.mu.Lock()
-		close(ch)
-		delete(kv.pendingCh, cmdIndex)
-
-		if args.Op == OpGet {
-			if val, exists := kv.state[args.Key]; exists {
-				reply.Value = val
-			} else {
-				reply.Err = ErrNoKey
-			}
+	case result := <-ch:
+		DPrintf("leader %v start reply", kv.me)
+		// Check this first, because the result might should send to other client's request which share the same cmdIndex.
+		// If so, the leader certainly has changed,we should let the client retry.
+		if result.Cid != args.Cid || result.Seq != args.Seq {
+			reply.Err = ErrWrongLeader
+		} else {
+			reply.Value = result.Value
 		}
-		kv.mu.Unlock()
+		DPrintf("leader %v reply done", kv.me)
 	case <-time.After(raft.RaftElectionTimeout):
+		DPrintf("leader %v timeout retry", kv.me)
 		reply.Err = ErrRetry
 	}
+
+	kv.mu.Lock()
+	// This opearation is idempotent, we don't need to worry about it like close(ch).
+	// We put it in channel to make it faster and don't block the reply.
+	delete(kv.pendingCh, cmdIndex)
+	// We must first check map exists then close(ch) if use go routine, to avoid async close/sendto closed channel in case timeouts+leader change cause multiple handlers came on the same cmdIndex.
+	close(ch)
+	kv.mu.Unlock()
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -139,11 +178,34 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.done)
 }
 
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) snapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.state)
+	e.Encode(kv.msgSeq)
+	return w.Bytes()
+}
+
+func (kv *KVServer) restoreState(snapshot []byte) {
+	if len(snapshot) < 1 {
+		kv.state = make(map[string]string)
+		kv.msgSeq = make(map[int64]int64)
+		return
+	}
+	rs := bytes.NewBuffer(snapshot)
+	ds := labgob.NewDecoder(rs)
+	if ds.Decode(&kv.state) != nil || ds.Decode(&kv.msgSeq) != nil {
+		panic("Restore from snapshot failed")
+	}
+	DPrintf("Restored state from snapshot, state len:%d", len(snapshot))
 }
 
 // servers[] contains the ports of the set of
@@ -168,14 +230,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-
+	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.restoreState(persister.ReadSnapshot())
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.pendingCh = map[int]chan Result{}
+	kv.done = make(chan int)
 
-	// You may need initialization code here.
-	kv.pendingCh = map[int]chan int{}
-	kv.state = make(map[string]string)
-	kv.msgSeq = make(map[int64]int64)
 	go kv.applyCmds()
 	return kv
 }

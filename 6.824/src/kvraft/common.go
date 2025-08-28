@@ -32,3 +32,9 @@ type Reply struct {
 	Value string
 	Term  int
 }
+
+type Result struct {
+	Cid   int64 // client id
+	Seq   int64 // sequence number
+	Value string
+}

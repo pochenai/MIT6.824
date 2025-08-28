@@ -65,7 +65,7 @@ func (ck *Clerk) Request(key string, value string, act Operation) string {
 			break
 		}
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrRetry {
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(1 * time.Millisecond)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 		}
 	}

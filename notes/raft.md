@@ -12,10 +12,11 @@
 - term更大
 - log 更长
 
-## **如何处理old RPC request/response, 保证处理结果是幂等的?**
+## **如何处理old RPC request/response, 保证异步处理结果是幂等的?**
 - 直接reject old RPC
     - sendRequestAppendEntries response: 根据 nextIndex reject
     - RequestInstallSnapshot request: 如果是leader了，直接reject
+## 超时、去重、幂等、并发请求和响应对应、channel退出防止内存泄漏等问题，需要定义清楚##
 
 # leader election
 ## 初始都是follower
@@ -119,3 +120,16 @@ sendAppendEntries:
     - 只有leader需要reply
     - 但是leader和follower都需要有状态
 - 2021年的3A测试文件有问题，会导致linearizability测试不通过，需要换成2020年的
+- **对于超时+去重处理：如何保证response是对于同一个client的？如何保证同一个client的request不被处理两次**
+    - 同一client的request seq number不能变，否则有可能被执行两次。但遇到以下问题，若seq=6先被处理了，seq5才来，那么有几种处理方式:
+        - 1.直接按最大seq丢弃seq5（目前的做法），这样的好处理时只用维护ClientID=>maxSeq的对应关系，坏处是seq5被丢弃
+        - 2.判断是否重复，若不重复在处理，坏处是需要维护所有处理过的历史信息
+    - 不同client共用了同一个cmdIndex,这种时候需要在applyCh到来时判断result.Cid != args.Cid || result.Seq != args.Seq，如果不一致，那么超时client的request(发动给leader A)一定是由新的leader B commit的消息触发的，此处需要返回Wrongleader错误并重试
+    - 同一client的消息超时之后重新发送给新leader，但是都是同一个cmdIndex，需要注意double close channel
+        - 在旧leader A超时，打算异步close ch，但假设还没获取lock， pendingCh还未被delete
+        - 新leader B正常响应，触发自己的reqest handler(但获取的同一个pendingCh对象)，处理完了准备异步close ch
+            - 此时leaderA开始close ch,delete pendingCh
+            - leaderB close相同的ch，导致double close channel
+- **channel同步如果没有正确关闭，会导致的go routine内存泄露问题**
+    - applyCh没有发送/接收方，会导致卡死程序无法退出，进而导致GoGC无法进行垃圾回收
+    - 可以通过profiling 观察goroutine数目看出来(内置profiling的程序到go程序里)
