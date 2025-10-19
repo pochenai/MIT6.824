@@ -585,7 +585,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 			existing = &rf.Log[relativeLogIndex]
 		}
 		if existing != nil {
-			if existing.Term != entry.Term || existing.Cmd != entry.Cmd { // same index but different term or different command
+			if existing.Term != entry.Term { // same index but different term or different command
 				// cond:3 Delete the existing entry and all that follow it
 				rf.Log = rf.Log[:relativeLogIndex]
 				rf.Log = append(rf.Log, entry)

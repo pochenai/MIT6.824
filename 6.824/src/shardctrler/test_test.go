@@ -88,15 +88,18 @@ func TestBasic(t *testing.T) {
 	fmt.Printf("Test: Basic leave/join ...\n")
 
 	cfa := make([]Config, 6)
+	fmt.Printf("Start Query ...\n")
 	cfa[0] = ck.Query(-1)
 
 	check(t, []int{}, ck)
 
+	fmt.Printf("Start Join gid1 ...\n")
 	var gid1 int = 1
 	ck.Join(map[int][]string{gid1: []string{"x", "y", "z"}})
 	check(t, []int{gid1}, ck)
 	cfa[1] = ck.Query(-1)
 
+	fmt.Printf("Start Join gid2 ...\n")
 	var gid2 int = 2
 	ck.Join(map[int][]string{gid2: []string{"a", "b", "c"}})
 	check(t, []int{gid1, gid2}, ck)
