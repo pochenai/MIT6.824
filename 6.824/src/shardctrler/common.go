@@ -43,6 +43,16 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (c *Config) ShardsForGID(gid int) []int {
+	var shards []int
+	for shard, g := range c.Shards {
+		if g == gid {
+			shards = append(shards, shard)
+		}
+	}
+	return shards
+}
+
 func (c *Config) clone() Config {
 	newG := maps.Clone(c.Groups)
 	for k, v := range c.Groups {
