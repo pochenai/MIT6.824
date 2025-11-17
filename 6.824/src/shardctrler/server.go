@@ -128,7 +128,7 @@ func (sc *ShardCtrler) applyCmds() {
 					//  The new configuration should divide the shards as evenly as possible among the full set of groups, and should move as few shards as possible to achieve that goal. The shardctrler should allow re-use of a GID if it's not part of the current configuration (i.e. a GID should be allowed to Join, then Leave, then Join again).
 					var args JoinArgs
 					json.Unmarshal(op.Args, &args)
-					config := sc.configs[len(sc.configs)-1].clone()
+					config := sc.configs[len(sc.configs)-1].Clone()
 					gids := make([]int, 0)
 					for k := range args.Servers {
 						gids = append(gids, k)
@@ -151,7 +151,7 @@ func (sc *ShardCtrler) applyCmds() {
 					// sc.state[op.Key] += op.Value
 					var args LeaveArgs
 					json.Unmarshal(op.Args, &args)
-					config := sc.configs[len(sc.configs)-1].clone()
+					config := sc.configs[len(sc.configs)-1].Clone()
 
 					newShards := rebalanceShards(config.Shards, OpLeave, args.GIDs)
 					newGroups := make(map[int][]string)
@@ -174,25 +174,27 @@ func (sc *ShardCtrler) applyCmds() {
 					// The Move RPC's arguments are a shard number and a GID. The shardctrler should create a new configuration in which the shard is assigned to the group. The purpose of Move is to allow us to test your software.
 					var args MoveArgs
 					json.Unmarshal(op.Args, &args)
-					newConfig := sc.configs[len(sc.configs)-1].clone()
+					newConfig := sc.configs[len(sc.configs)-1].Clone()
 					newConfig.Shards[args.Shard] = args.GID
 					newConfig.Num += 1
 					DPrintf("OpMove args:%v", args)
 					DPrintf("OpMove previous config:%v", sc.configs[len(sc.configs)-1])
 					DPrintf("OpMove new config:%v", newConfig)
 					sc.configs = append(sc.configs, newConfig)
-
-				case OpQuery:
-					var args QueryArgs
-					json.Unmarshal(op.Args, &args)
-					if args.Num >= 0 && args.Num < len(sc.configs) {
-						result.Config = sc.configs[args.Num]
-					} else {
-						result.Config = sc.configs[len(sc.configs)-1]
-					}
-					DPrintf("OpQuery args:%v", args)
-					DPrintf("OpQuery result:%v", result.Config)
 				}
+			}
+
+			// we should return correct results for OpQuery incase we receive late query results before OpJoin, OpLeave and OpMove. Or the result's for OpQuery will be config0, which is incorrect.
+			if op.OpType == OpQuery {
+				var args QueryArgs
+				json.Unmarshal(op.Args, &args)
+				if args.Num >= 0 && args.Num < len(sc.configs) {
+					result.Config = sc.configs[args.Num]
+				} else {
+					result.Config = sc.configs[len(sc.configs)-1]
+				}
+				DPrintf("OpQuery args:%v", args)
+				DPrintf("OpQuery result:%v", result.Config)
 			}
 
 			sc.mu.Unlock()
@@ -264,7 +266,7 @@ func (sc *ShardCtrler) Request(op *Op, reply *Reply) {
 	var ch chan Result
 	// Use lock to ensure pendingCh is created first before applyCh or server might get stuck in select <-ch during Get/PutAppend
 	if _, exists := sc.pendingCh[cmdIndex]; !exists {
-		sc.pendingCh[cmdIndex] = make(chan Result)
+		sc.pendingCh[cmdIndex] = make(chan Result, 1)
 	}
 	ch = sc.pendingCh[cmdIndex]
 	sc.mu.Unlock()
@@ -325,12 +327,13 @@ func (sc *ShardCtrler) snapshot() []byte {
 }
 
 func (sc *ShardCtrler) restoreState(snapshot []byte) {
+	sc.configs = make([]Config, 1)
+	sc.msgSeq = make(map[int64]int64)
 	if len(snapshot) < 1 {
-		sc.configs = make([]Config, 1)
 		sc.configs[0].Groups = map[int][]string{}
-		sc.msgSeq = make(map[int64]int64)
 		return
 	}
+	// If we don't initialize the kv state, the previous state will also be decoded into the new state instead if overwriting all fields!
 	rs := bytes.NewBuffer(snapshot)
 	ds := labgob.NewDecoder(rs)
 	if ds.Decode(&sc.configs) != nil || ds.Decode(&sc.msgSeq) != nil {

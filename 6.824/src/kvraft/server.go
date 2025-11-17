@@ -135,7 +135,7 @@ func (kv *KVServer) Request(args *ReqArg, reply *Reply) {
 	var ch chan Result
 	// Use lock to ensure pendingCh is created first before applyCh or server might get stuck in select <-ch during Get/PutAppend
 	if _, exists := kv.pendingCh[cmdIndex]; !exists {
-		kv.pendingCh[cmdIndex] = make(chan Result)
+		kv.pendingCh[cmdIndex] = make(chan Result, 1)
 	}
 	ch = kv.pendingCh[cmdIndex]
 	kv.mu.Unlock()
@@ -144,7 +144,7 @@ func (kv *KVServer) Request(args *ReqArg, reply *Reply) {
 	select {
 	case result := <-ch:
 		DPrintf("leader %v start reply", kv.me)
-		// Check this first, because the result might should send to other client's request which share the same cmdIndex.
+		// Check this first, because the result might should send to other client's request which share the same cmdIndex, which cause client's request execute out of order (they should be in order, if only 1 leader process the requests).
 		// If so, the leader certainly has changed,we should let the client retry.
 		if result.Cid != args.Cid || result.Seq != args.Seq {
 			reply.Err = ErrWrongLeader
@@ -195,11 +195,12 @@ func (kv *KVServer) snapshot() []byte {
 }
 
 func (kv *KVServer) restoreState(snapshot []byte) {
+	kv.state = make(map[string]string)
+	kv.msgSeq = make(map[int64]int64)
 	if len(snapshot) < 1 {
-		kv.state = make(map[string]string)
-		kv.msgSeq = make(map[int64]int64)
 		return
 	}
+	// If we don't initialize the kv state, the previous state will also be decoded into the new state instead if overwriting all fields!
 	rs := bytes.NewBuffer(snapshot)
 	ds := labgob.NewDecoder(rs)
 	if ds.Decode(&kv.state) != nil || ds.Decode(&kv.msgSeq) != nil {
