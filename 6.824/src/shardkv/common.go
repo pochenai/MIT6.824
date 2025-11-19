@@ -1,6 +1,11 @@
 package shardkv
 
-import "log"
+import (
+	"log"
+	"maps"
+
+	"6.824/shardctrler"
+)
 
 //
 // Sharded key/value server.
@@ -11,7 +16,7 @@ import "log"
 // You will have to modify these definitions.
 //
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -26,8 +31,9 @@ const (
 	OpGet Operation = iota
 	OpPut
 	OpAppend
-	OpFetchShards
-	OpUpdateCfg
+	OpMoveShards
+	OpUpdateShardsState
+	OpEmpty
 )
 
 func (op Operation) String() string {
@@ -38,10 +44,10 @@ func (op Operation) String() string {
 		return "Put"
 	case OpAppend:
 		return "Append"
-	case OpFetchShards:
-		return "FetchShards"
-	case OpUpdateCfg:
-		return "UpdateCfg"
+	case OpMoveShards:
+		return "MoveShards"
+	case OpUpdateShardsState:
+		return "UpdateShardsState"
 	default:
 		return "UnknownOperation"
 	}
@@ -50,9 +56,11 @@ func (op Operation) String() string {
 const (
 	OK = "OK"
 	// ErrNoKey       = "ErrNoKey"  // no need due to it'll return "" for Get request of non-existing key
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrRetry       = "ErrRetry"
+	ErrWrongGroup       = "ErrWrongGroup"
+	ErrWrongLeader      = "ErrWrongLeader"
+	ErrWaitingSyncShard = "ErrWaitingSyncShard"
+	ErrRetry            = "ErrRetry"
+	ErrReqOutdated      = "ErrReqOutdated"
 )
 
 type Err string
@@ -86,32 +94,63 @@ type ReqArg struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
+	// common fields
+	Cid int64 // client id
+	Seq int64 // sequence number
+
+	// for OpGet, OpPut, OpAppend
 	Key   string
-	Value string
-	Op    Operation // "Get", "Put", or "Append"
-	Cid   int64     // client id
-	Seq   int64     // sequence number
+	Value []byte
+	Op    Operation
+
+	// for OpMoveShards, OpUpdateShardsState
+	FromGid        int
+	PrevNextConfig shardctrler.Config // for both
+	NextConfig     shardctrler.Config // only for OpUpdateShardsState
+	Shards         []int              // only for OpMoveShards
+	State          map[int]ShardState // only for OpUpdateShardsState
 }
 
 type Reply struct {
 	Err   Err
 	Value string
+	// for sync shards
+	ShardsState []byte // use bytes instead of map to avoid state change after network transfer
 }
+
+type ShardState struct {
+	MsgSeq map[int64]int64
+	State  map[string]string
+}
+
+func NewShardState() ShardState {
+	return ShardState{
+		MsgSeq: make(map[int64]int64),
+		State:  make(map[string]string),
+	}
+}
+
+func (s ShardState) Clone() ShardState {
+	return ShardState{
+		MsgSeq: maps.Clone(s.MsgSeq),
+		State:  maps.Clone(s.State),
+	}
+}
+
+type ShardsStatus int
+
+const (
+	StateSynced ShardsStatus = iota
+	StateSyncing
+	StateUpdated
+)
 
 type Result struct {
-	Cid   int64 // client id
-	Seq   int64 // sequence number
-	Value string
-	Gid   int
-}
-
-type MvShardsReq struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-	Shards map[int]map[string]string // shard -> key-value map
-	Value  string
-	Op     Operation // "Get", "Put", or "Append"
-	Cid    int64     // client id
-	Seq    int64     // sequence number
+	Cid          int64 // client id
+	Seq          int64 // sequence number
+	Value        string
+	Gid          int
+	ShardsState  []byte
+	ShardsStatus ShardsStatus
 }

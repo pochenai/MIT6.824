@@ -44,6 +44,7 @@ import (
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
+	Term         int
 	CommandIndex int
 	LeaderId     int
 
@@ -115,6 +116,9 @@ type Raft struct {
 	LastIncludedIndex int // start from -1
 	LastIncludedTerm  int
 	SnapshotState     []byte
+
+	// for lab4D debug
+	gid int
 }
 
 // return currentTerm and whether this server
@@ -129,6 +133,17 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.CurrentTerm
 	isleader = rf.role == Leader
 	return term, isleader
+}
+
+// return isleader, hasLeaderAppliedNewLogInCurrentTerm
+func (rf *Raft) AppliedNewLogInCurrentTerm() (bool, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	appliedNewLog := rf.LastIncludedTerm == rf.CurrentTerm
+	if len(rf.Log) > 0 {
+		appliedNewLog = rf.Log[len(rf.Log)-1].Term == rf.CurrentTerm
+	}
+	return rf.role == Leader, appliedNewLog
 }
 
 // save Raft's persistent state to stable storage,
@@ -231,6 +246,7 @@ func (rf *Raft) RequestInstallSnapshot(args *RequestInstallSnapshot, reply *Inst
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("leader:%v, RequestInstallSnapshot to peer: %v, lastIncludedIndex:%v, lastIncludedTerm:%v, myLastIncIdx:%v, myLastIncTerm:%v", args.LeaderID, rf.me, args.LastIncludedIndex, args.LastIncludedTerm, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	fmt.Printf("group: %v, leader:%v, RequestInstallSnapshot to peer: %v, lastIncludedIndex:%v, lastIncludedTerm:%v, myLastIncIdx:%v, myLastIncTerm:%v\n", rf.gid, args.LeaderID, rf.me, args.LastIncludedIndex, args.LastIncludedTerm, rf.LastIncludedIndex, rf.LastIncludedTerm)
 	reply.Term = rf.CurrentTerm
 	reply.Success = false
 
@@ -259,15 +275,18 @@ func (rf *Raft) RequestInstallSnapshot(args *RequestInstallSnapshot, reply *Inst
 		Snapshot:      args.Data,
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: logIndexToApplyChIndex(args.LastIncludedIndex),
+		Term:          args.Term,
 		LeaderId:      args.LeaderID,
 	})
 	DPrintf("peer %v, applySnapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	fmt.Printf("group:%v, peer %v, applySnapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.gid, rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
 
 	// Add dummy applyMsg to make sure Snapshot is installed before this RPC.
 	msgs = append(msgs, ApplyMsg{
 		CommandValid: false,
 		Command:      nil,
 		CommandIndex: -2,
+		Term:         args.Term,
 		LeaderId:     args.LeaderID,
 	})
 
@@ -445,6 +464,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 							CommandValid: true,
 							Command:      cmd,
 							CommandIndex: commitedInd,
+							Term:         rf.CurrentTerm,
 							LeaderId:     rf.me,
 						})
 					}
@@ -454,6 +474,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 						CommandValid: false,
 						Command:      nil,
 						CommandIndex: -2,
+						Term:         rf.CurrentTerm,
 						LeaderId:     rf.me,
 					})
 					// send ApplyMsg to applyCh for tester
@@ -614,6 +635,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 				CommandValid: true,
 				Command:      cmd,
 				CommandIndex: commitedInd,
+				Term:         args.Term,
 				LeaderId:     args.LeaderId,
 			})
 		}
@@ -623,6 +645,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 			CommandValid: false,
 			Command:      nil,
 			CommandIndex: -2,
+			Term:         args.Term,
 			LeaderId:     args.LeaderId,
 		})
 		DPrintf("follower:%v,  set commit index: %v", rf.me, logIndexToApplyChIndex(commitIndex))
@@ -674,6 +697,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	lastTerm, lastIndex := rf.LastLog()
 	DPrintf("server %v, get requestVote: %v, curTerm:%v, lastTerm:%v, lastIndex:%v,role:%v,votedFor:%v", rf.me, args, rf.CurrentTerm, lastTerm, lastIndex, rf.role, rf.VotedFor)
+	fmt.Printf("group: %v, server %v, get requestVote: %v, curTerm:%v, lastTerm:%v, lastIndex:%v,role:%v,votedFor:%v\n", rf.gid, rf.me, args, rf.CurrentTerm, lastTerm, lastIndex, rf.role, rf.VotedFor)
 	reply.VoteGranted = false
 
 	reply.Term = rf.CurrentTerm
@@ -940,6 +964,7 @@ func (rf *Raft) kickOffLeaderElection(electionTimeout time.Duration) {
 				defer mu.Unlock()
 				if ok && reply.VoteGranted {
 					DPrintf("server %v got vote from %v, reply: %v", rf.me, server, reply)
+					fmt.Printf("group: %v, server %v got vote from %v, reply: %v\n", rf.gid, rf.me, server, reply)
 					totalVotes += 1
 				}
 				finished += 1
@@ -958,6 +983,7 @@ func (rf *Raft) kickOffLeaderElection(electionTimeout time.Duration) {
 			defer rf.mu.Unlock()
 			if rf.role == Candicate && rf.CurrentTerm == term && time.Since(start) < electionTimeout {
 				DPrintf("peer: %v, selected as leader", rf.me)
+				fmt.Println("group:", rf.gid, "peer:", rf.me, "become leader")
 				rf.role = Leader
 				// shouldn't reset votedFor=-1 here, cause we don't allow for voting for other candidates in the same term.
 				rf.nextIndex = make([]int, len(rf.peers))
@@ -1032,7 +1058,7 @@ func (rf *Raft) ticker() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg, debug bool) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -1070,6 +1096,60 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		// initialize to -1
 		rf.matchIndex[i] = -1
 	}
+
+	Debug = debug
+
+	DPrintf("follower: %v, Candicate: %v, leader:%v", Follower, Candicate, Leader)
+	// start ticker goroutine to start elections
+	go rf.ticker()
+
+	return rf
+}
+
+func MakeWithGid(peers []*labrpc.ClientEnd, me int,
+	persister *Persister, applyCh chan ApplyMsg, gid int, debug bool) *Raft {
+	rf := &Raft{}
+	rf.peers = peers
+	rf.persister = persister
+	rf.me = me
+	ctx, cancel := context.WithCancel(context.Background())
+	rf.ctx = ctx
+	rf.cancel = cancel
+	// Your initialization code here (2A, 2B, 2C).
+	// 2A
+	rf.VotedFor = -1
+	rf.role = Follower
+	rf.lastLive = time.Now()
+	rf.CurrentTerm = 0
+	rf.commitIndex = -1
+
+	// 2B
+	rf.applyCh = applyCh
+
+	// 2C
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+
+	// 2D
+	rf.LastIncludedIndex = -1
+	rf.LastIncludedTerm = -1
+
+	// for lab4D: debug
+	rf.gid = gid
+
+	// Initialize from state persisted before a crash. It shoulde be initialized before setting nextIndex.
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
+
+	for i := range rf.nextIndex {
+		// initialize to leader last log index + 1
+		rf.nextIndex[i] = len(rf.Log) + rf.LastIncludedIndex + 1
+	}
+	for i := range rf.nextIndex {
+		// initialize to -1
+		rf.matchIndex[i] = -1
+	}
+
+	Debug = debug
 
 	DPrintf("follower: %v, Candicate: %v, leader:%v", Follower, Candicate, Leader)
 	// start ticker goroutine to start elections

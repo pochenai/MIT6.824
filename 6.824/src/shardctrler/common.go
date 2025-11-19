@@ -2,7 +2,6 @@ package shardctrler
 
 import (
 	"log"
-	"maps"
 	"sort"
 )
 
@@ -43,6 +42,20 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (c *Config) Clone() Config {
+	newG := make(map[int][]string, len(c.Groups))
+	for k, v := range c.Groups {
+		newSlice := make([]string, len(v))
+		copy(newSlice, v)
+		newG[k] = newSlice
+	}
+	return Config{
+		Num:    c.Num,
+		Shards: c.Shards,
+		Groups: newG,
+	}
+}
+
 func (c *Config) ShardsForGID(gid int) []int {
 	var shards []int
 	for shard, g := range c.Shards {
@@ -51,18 +64,6 @@ func (c *Config) ShardsForGID(gid int) []int {
 		}
 	}
 	return shards
-}
-
-func (c *Config) clone() Config {
-	newG := maps.Clone(c.Groups)
-	for k, v := range c.Groups {
-		copy(newG[k], v)
-	}
-	return Config{
-		Num:    c.Num,
-		Shards: c.Shards,
-		Groups: newG,
-	}
 }
 
 const (

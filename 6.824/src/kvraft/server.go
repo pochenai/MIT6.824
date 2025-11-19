@@ -234,7 +234,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.restoreState(persister.ReadSnapshot())
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, false)
 	kv.pendingCh = map[int]chan Result{}
 	kv.done = make(chan int)
 

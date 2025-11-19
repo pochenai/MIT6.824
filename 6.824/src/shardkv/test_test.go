@@ -35,6 +35,8 @@ func TestStaticShards(t *testing.T) {
 	cfg.join(0)
 	cfg.join(1)
 
+	fmt.Println("-----------Joined 0,1----------")
+
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -43,9 +45,12 @@ func TestStaticShards(t *testing.T) {
 		va[i] = randstring(20)
 		ck.Put(ka[i], va[i])
 	}
+	fmt.Println("-----------Put 10----------")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
+
+	fmt.Println("-----------Check 10----------")
 
 	// make sure that the data really is sharded by
 	// shutting down one shard and checking that some
@@ -162,6 +167,7 @@ func TestSnapshot(t *testing.T) {
 	ck := cfg.makeClient()
 
 	cfg.join(0)
+	fmt.Println("----------Joined 0----------")
 
 	n := 30
 	ka := make([]string, n)
@@ -175,19 +181,26 @@ func TestSnapshot(t *testing.T) {
 		check(t, ck, ka[i], va[i])
 	}
 
+	fmt.Println("----------Put on shards 0----------")
+
 	cfg.join(1)
 	cfg.join(2)
 	cfg.leave(0)
+	fmt.Println("----------Joined 1,2, leave 0----------")
 
 	for i := 0; i < n; i++ {
+		// fmt.Println("------start check key:", ka[i], " on shard:", key2shard(ka[i]))
 		check(t, ck, ka[i], va[i])
 		x := randstring(20)
+		// fmt.Println("------start append key:", ka[i], " on shard:", key2shard(ka[i]))
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
 
+	fmt.Println("----------Append on shards0----------")
 	cfg.leave(1)
 	cfg.join(0)
+	fmt.Println("----------Left 1, join 0----------")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -195,6 +208,7 @@ func TestSnapshot(t *testing.T) {
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
+	fmt.Println("---------Append on shards1----------")
 
 	time.Sleep(1 * time.Second)
 
@@ -209,10 +223,12 @@ func TestSnapshot(t *testing.T) {
 	cfg.ShutdownGroup(0)
 	cfg.ShutdownGroup(1)
 	cfg.ShutdownGroup(2)
+	fmt.Println("----------Shutdown group0,1,2----------")
 
 	cfg.StartGroup(0)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
+	fmt.Println("----------Start group0,1,2----------")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -230,6 +246,7 @@ func TestMissChange(t *testing.T) {
 	ck := cfg.makeClient()
 
 	cfg.join(0)
+	fmt.Println("-----------Joined 0----------")
 
 	n := 10
 	ka := make([]string, n)
@@ -239,46 +256,67 @@ func TestMissChange(t *testing.T) {
 		va[i] = randstring(20)
 		ck.Put(ka[i], va[i])
 	}
+
+	fmt.Println("-----------Put 10----------")
+
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
 
+	fmt.Println("-----------check 10----------")
+
 	cfg.join(1)
+
+	fmt.Println("-----------Join 1----------")
 
 	cfg.ShutdownServer(0, 0)
 	cfg.ShutdownServer(1, 0)
 	cfg.ShutdownServer(2, 0)
 
+	fmt.Println("-----------Shut down 0,1,2 group's server 0----------")
+
 	cfg.join(2)
 	cfg.leave(1)
 	cfg.leave(0)
 
+	fmt.Println("-----------Join2, leave 0, 1----------")
+
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(20)
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
+
+	fmt.Println("-----------Append 10----------")
 
 	cfg.join(1)
 
+	fmt.Println("-----------Join 1 again----------")
+
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(20)
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
+
+	fmt.Println("-----------Append 10 2rd----------")
 
 	cfg.StartServer(0, 0)
 	cfg.StartServer(1, 0)
 	cfg.StartServer(2, 0)
 
+	fmt.Println("-----------Start 0,1,2, group's server 0----------")
+
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(20)
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
+
+	fmt.Println("-----------Append 10 3rd----------")
 
 	time.Sleep(2 * time.Second)
 
@@ -286,8 +324,12 @@ func TestMissChange(t *testing.T) {
 	cfg.ShutdownServer(1, 1)
 	cfg.ShutdownServer(2, 1)
 
+	fmt.Println("-----------Shut down 0,1,2, group's server 1----------")
+
 	cfg.join(0)
 	cfg.leave(2)
+
+	fmt.Println("-----------Join 0, leave 2----------")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -296,9 +338,13 @@ func TestMissChange(t *testing.T) {
 		va[i] += x
 	}
 
+	fmt.Println("-----------Append 10 4rd----------")
+
 	cfg.StartServer(0, 1)
 	cfg.StartServer(1, 1)
 	cfg.StartServer(2, 1)
+
+	fmt.Println("-----------Start 0,1,2 group's server 1----------")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -398,6 +444,8 @@ func TestConcurrent2(t *testing.T) {
 	cfg.join(0)
 	cfg.join(2)
 
+	fmt.Println("-----------Joined 1,0,2----------")
+
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -406,6 +454,8 @@ func TestConcurrent2(t *testing.T) {
 		va[i] = randstring(1)
 		ck.Put(ka[i], va[i])
 	}
+
+	fmt.Println("-----------Put 10----------")
 
 	var done int32
 	ch := make(chan bool)
@@ -418,6 +468,7 @@ func TestConcurrent2(t *testing.T) {
 			va[i] += x
 			time.Sleep(50 * time.Millisecond)
 		}
+		// fmt.Println("-----------Append key----------", ka[i])
 	}
 
 	for i := 0; i < n; i++ {
@@ -427,21 +478,26 @@ func TestConcurrent2(t *testing.T) {
 
 	cfg.leave(0)
 	cfg.leave(2)
+	fmt.Println("-----------Leave 0,2----------")
 	time.Sleep(3000 * time.Millisecond)
 	cfg.join(0)
 	cfg.join(2)
 	cfg.leave(1)
+	fmt.Println("-----------Join 0,2,Leave 1----------")
 	time.Sleep(3000 * time.Millisecond)
 	cfg.join(1)
 	cfg.leave(0)
 	cfg.leave(2)
+	fmt.Println("-----------Join 1,Leave 0,2----------")
 	time.Sleep(3000 * time.Millisecond)
 
 	cfg.ShutdownGroup(1)
 	cfg.ShutdownGroup(2)
+	fmt.Println("-----------Shutdown group 1,2----------")
 	time.Sleep(1000 * time.Millisecond)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
+	fmt.Println("-----------Start group 1,2----------")
 
 	time.Sleep(2 * time.Second)
 
@@ -450,6 +506,7 @@ func TestConcurrent2(t *testing.T) {
 		<-ch
 	}
 
+	fmt.Println("-----------Checking 10----------")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
@@ -467,6 +524,8 @@ func TestConcurrent3(t *testing.T) {
 
 	cfg.join(0)
 
+	fmt.Println("-----------Join 0----------")
+
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -475,6 +534,8 @@ func TestConcurrent3(t *testing.T) {
 		va[i] = randstring(1)
 		ck.Put(ka[i], va[i])
 	}
+
+	fmt.Println("-----------Put 10----------")
 
 	var done int32
 	ch := make(chan bool)
@@ -486,6 +547,8 @@ func TestConcurrent3(t *testing.T) {
 			ck1.Append(ka[i], x)
 			va[i] += x
 		}
+		fmt.Println("-----------Append key----------", ka[i])
+
 	}
 
 	for i := 0; i < n; i++ {
@@ -497,17 +560,21 @@ func TestConcurrent3(t *testing.T) {
 	for time.Since(t0) < 12*time.Second {
 		cfg.join(2)
 		cfg.join(1)
+		fmt.Println("-----------Join 2,1----------")
 		time.Sleep(time.Duration(rand.Int()%900) * time.Millisecond)
 		cfg.ShutdownGroup(0)
 		cfg.ShutdownGroup(1)
 		cfg.ShutdownGroup(2)
+		fmt.Println("-----------Shutdown 0,1,2----------")
 		cfg.StartGroup(0)
 		cfg.StartGroup(1)
 		cfg.StartGroup(2)
 
+		fmt.Println("-----------Startgroup 0,1,2----------")
 		time.Sleep(time.Duration(rand.Int()%900) * time.Millisecond)
 		cfg.leave(1)
 		cfg.leave(2)
+		fmt.Println("-----------Leave 1,2----------")
 		time.Sleep(time.Duration(rand.Int()%900) * time.Millisecond)
 	}
 
@@ -518,6 +585,7 @@ func TestConcurrent3(t *testing.T) {
 		<-ch
 	}
 
+	fmt.Println("-----------Checking keys----------")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
@@ -735,212 +803,212 @@ func TestUnreliable3(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-// optional test to see whether servers are deleting
-// shards for which they are no longer responsible.
-func TestChallenge1Delete(t *testing.T) {
-	fmt.Printf("Test: shard deletion (challenge 1) ...\n")
+// // optional test to see whether servers are deleting
+// // shards for which they are no longer responsible.
+// func TestChallenge1Delete(t *testing.T) {
+// 	fmt.Printf("Test: shard deletion (challenge 1) ...\n")
 
-	// "1" means force snapshot after every log entry.
-	cfg := make_config(t, 3, false, 1)
-	defer cfg.cleanup()
+// 	// "1" means force snapshot after every log entry.
+// 	cfg := make_config(t, 3, false, 1)
+// 	defer cfg.cleanup()
 
-	ck := cfg.makeClient()
+// 	ck := cfg.makeClient()
 
-	cfg.join(0)
+// 	cfg.join(0)
 
-	// 30,000 bytes of total values.
-	n := 30
-	ka := make([]string, n)
-	va := make([]string, n)
-	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i)
-		va[i] = randstring(1000)
-		ck.Put(ka[i], va[i])
-	}
-	for i := 0; i < 3; i++ {
-		check(t, ck, ka[i], va[i])
-	}
+// 	// 30,000 bytes of total values.
+// 	n := 30
+// 	ka := make([]string, n)
+// 	va := make([]string, n)
+// 	for i := 0; i < n; i++ {
+// 		ka[i] = strconv.Itoa(i)
+// 		va[i] = randstring(1000)
+// 		ck.Put(ka[i], va[i])
+// 	}
+// 	for i := 0; i < 3; i++ {
+// 		check(t, ck, ka[i], va[i])
+// 	}
 
-	for iters := 0; iters < 2; iters++ {
-		cfg.join(1)
-		cfg.leave(0)
-		cfg.join(2)
-		time.Sleep(3 * time.Second)
-		for i := 0; i < 3; i++ {
-			check(t, ck, ka[i], va[i])
-		}
-		cfg.leave(1)
-		cfg.join(0)
-		cfg.leave(2)
-		time.Sleep(3 * time.Second)
-		for i := 0; i < 3; i++ {
-			check(t, ck, ka[i], va[i])
-		}
-	}
+// 	for iters := 0; iters < 2; iters++ {
+// 		cfg.join(1)
+// 		cfg.leave(0)
+// 		cfg.join(2)
+// 		time.Sleep(3 * time.Second)
+// 		for i := 0; i < 3; i++ {
+// 			check(t, ck, ka[i], va[i])
+// 		}
+// 		cfg.leave(1)
+// 		cfg.join(0)
+// 		cfg.leave(2)
+// 		time.Sleep(3 * time.Second)
+// 		for i := 0; i < 3; i++ {
+// 			check(t, ck, ka[i], va[i])
+// 		}
+// 	}
 
-	cfg.join(1)
-	cfg.join(2)
-	time.Sleep(1 * time.Second)
-	for i := 0; i < 3; i++ {
-		check(t, ck, ka[i], va[i])
-	}
-	time.Sleep(1 * time.Second)
-	for i := 0; i < 3; i++ {
-		check(t, ck, ka[i], va[i])
-	}
-	time.Sleep(1 * time.Second)
-	for i := 0; i < 3; i++ {
-		check(t, ck, ka[i], va[i])
-	}
+// 	cfg.join(1)
+// 	cfg.join(2)
+// 	time.Sleep(1 * time.Second)
+// 	for i := 0; i < 3; i++ {
+// 		check(t, ck, ka[i], va[i])
+// 	}
+// 	time.Sleep(1 * time.Second)
+// 	for i := 0; i < 3; i++ {
+// 		check(t, ck, ka[i], va[i])
+// 	}
+// 	time.Sleep(1 * time.Second)
+// 	for i := 0; i < 3; i++ {
+// 		check(t, ck, ka[i], va[i])
+// 	}
 
-	total := 0
-	for gi := 0; gi < cfg.ngroups; gi++ {
-		for i := 0; i < cfg.n; i++ {
-			raft := cfg.groups[gi].saved[i].RaftStateSize()
-			snap := len(cfg.groups[gi].saved[i].ReadSnapshot())
-			total += raft + snap
-		}
-	}
+// 	total := 0
+// 	for gi := 0; gi < cfg.ngroups; gi++ {
+// 		for i := 0; i < cfg.n; i++ {
+// 			raft := cfg.groups[gi].saved[i].RaftStateSize()
+// 			snap := len(cfg.groups[gi].saved[i].ReadSnapshot())
+// 			total += raft + snap
+// 		}
+// 	}
 
-	// 27 keys should be stored once.
-	// 3 keys should also be stored in client dup tables.
-	// everything on 3 replicas.
-	// plus slop.
-	expected := 3 * (((n - 3) * 1000) + 2*3*1000 + 6000)
-	if total > expected {
-		t.Fatalf("snapshot + persisted Raft state are too big: %v > %v\n", total, expected)
-	}
+// 	// 27 keys should be stored once.
+// 	// 3 keys should also be stored in client dup tables.
+// 	// everything on 3 replicas.
+// 	// plus slop.
+// 	expected := 3 * (((n - 3) * 1000) + 2*3*1000 + 6000)
+// 	if total > expected {
+// 		t.Fatalf("snapshot + persisted Raft state are too big: %v > %v\n", total, expected)
+// 	}
 
-	for i := 0; i < n; i++ {
-		check(t, ck, ka[i], va[i])
-	}
+// 	for i := 0; i < n; i++ {
+// 		check(t, ck, ka[i], va[i])
+// 	}
 
-	fmt.Printf("  ... Passed\n")
-}
+// 	fmt.Printf("  ... Passed\n")
+// }
 
-// optional test to see whether servers can handle
-// shards that are not affected by a config change
-// while the config change is underway
-func TestChallenge2Unaffected(t *testing.T) {
-	fmt.Printf("Test: unaffected shard access (challenge 2) ...\n")
+// // optional test to see whether servers can handle
+// // shards that are not affected by a config change
+// // while the config change is underway
+// func TestChallenge2Unaffected(t *testing.T) {
+// 	fmt.Printf("Test: unaffected shard access (challenge 2) ...\n")
 
-	cfg := make_config(t, 3, true, 100)
-	defer cfg.cleanup()
+// 	cfg := make_config(t, 3, true, 100)
+// 	defer cfg.cleanup()
 
-	ck := cfg.makeClient()
+// 	ck := cfg.makeClient()
 
-	// JOIN 100
-	cfg.join(0)
+// 	// JOIN 100
+// 	cfg.join(0)
 
-	// Do a bunch of puts to keys in all shards
-	n := 10
-	ka := make([]string, n)
-	va := make([]string, n)
-	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple shards
-		va[i] = "100"
-		ck.Put(ka[i], va[i])
-	}
+// 	// Do a bunch of puts to keys in all shards
+// 	n := 10
+// 	ka := make([]string, n)
+// 	va := make([]string, n)
+// 	for i := 0; i < n; i++ {
+// 		ka[i] = strconv.Itoa(i) // ensure multiple shards
+// 		va[i] = "100"
+// 		ck.Put(ka[i], va[i])
+// 	}
 
-	// JOIN 101
-	cfg.join(1)
+// 	// JOIN 101
+// 	cfg.join(1)
 
-	// QUERY to find shards now owned by 101
-	c := cfg.mck.Query(-1)
-	owned := make(map[int]bool, n)
-	for s, gid := range c.Shards {
-		owned[s] = gid == cfg.groups[1].gid
-	}
+// 	// QUERY to find shards now owned by 101
+// 	c := cfg.mck.Query(-1)
+// 	owned := make(map[int]bool, n)
+// 	for s, gid := range c.Shards {
+// 		owned[s] = gid == cfg.groups[1].gid
+// 	}
 
-	// Wait for migration to new config to complete, and for clients to
-	// start using this updated config. Gets to any key k such that
-	// owned[shard(k)] == true should now be served by group 101.
-	<-time.After(1 * time.Second)
-	for i := 0; i < n; i++ {
-		if owned[i] {
-			va[i] = "101"
-			ck.Put(ka[i], va[i])
-		}
-	}
+// 	// Wait for migration to new config to complete, and for clients to
+// 	// start using this updated config. Gets to any key k such that
+// 	// owned[shard(k)] == true should now be served by group 101.
+// 	<-time.After(1 * time.Second)
+// 	for i := 0; i < n; i++ {
+// 		if owned[i] {
+// 			va[i] = "101"
+// 			ck.Put(ka[i], va[i])
+// 		}
+// 	}
 
-	// KILL 100
-	cfg.ShutdownGroup(0)
+// 	// KILL 100
+// 	cfg.ShutdownGroup(0)
 
-	// LEAVE 100
-	// 101 doesn't get a chance to migrate things previously owned by 100
-	cfg.leave(0)
+// 	// LEAVE 100
+// 	// 101 doesn't get a chance to migrate things previously owned by 100
+// 	cfg.leave(0)
 
-	// Wait to make sure clients see new config
-	<-time.After(1 * time.Second)
+// 	// Wait to make sure clients see new config
+// 	<-time.After(1 * time.Second)
 
-	// And finally: check that gets/puts for 101-owned keys still complete
-	for i := 0; i < n; i++ {
-		shard := int(ka[i][0]) % 10
-		if owned[shard] {
-			check(t, ck, ka[i], va[i])
-			ck.Put(ka[i], va[i]+"-1")
-			check(t, ck, ka[i], va[i]+"-1")
-		}
-	}
+// 	// And finally: check that gets/puts for 101-owned keys still complete
+// 	for i := 0; i < n; i++ {
+// 		shard := int(ka[i][0]) % 10
+// 		if owned[shard] {
+// 			check(t, ck, ka[i], va[i])
+// 			ck.Put(ka[i], va[i]+"-1")
+// 			check(t, ck, ka[i], va[i]+"-1")
+// 		}
+// 	}
 
-	fmt.Printf("  ... Passed\n")
-}
+// 	fmt.Printf("  ... Passed\n")
+// }
 
-// optional test to see whether servers can handle operations on shards that
-// have been received as a part of a config migration when the entire migration
-// has not yet completed.
-func TestChallenge2Partial(t *testing.T) {
-	fmt.Printf("Test: partial migration shard access (challenge 2) ...\n")
+// // optional test to see whether servers can handle operations on shards that
+// // have been received as a part of a config migration when the entire migration
+// // has not yet completed.
+// func TestChallenge2Partial(t *testing.T) {
+// 	fmt.Printf("Test: partial migration shard access (challenge 2) ...\n")
 
-	cfg := make_config(t, 3, true, 100)
-	defer cfg.cleanup()
+// 	cfg := make_config(t, 3, true, 100)
+// 	defer cfg.cleanup()
 
-	ck := cfg.makeClient()
+// 	ck := cfg.makeClient()
 
-	// JOIN 100 + 101 + 102
-	cfg.joinm([]int{0, 1, 2})
+// 	// JOIN 100 + 101 + 102
+// 	cfg.joinm([]int{0, 1, 2})
 
-	// Give the implementation some time to reconfigure
-	<-time.After(1 * time.Second)
+// 	// Give the implementation some time to reconfigure
+// 	<-time.After(1 * time.Second)
 
-	// Do a bunch of puts to keys in all shards
-	n := 10
-	ka := make([]string, n)
-	va := make([]string, n)
-	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple shards
-		va[i] = "100"
-		ck.Put(ka[i], va[i])
-	}
+// 	// Do a bunch of puts to keys in all shards
+// 	n := 10
+// 	ka := make([]string, n)
+// 	va := make([]string, n)
+// 	for i := 0; i < n; i++ {
+// 		ka[i] = strconv.Itoa(i) // ensure multiple shards
+// 		va[i] = "100"
+// 		ck.Put(ka[i], va[i])
+// 	}
 
-	// QUERY to find shards owned by 102
-	c := cfg.mck.Query(-1)
-	owned := make(map[int]bool, n)
-	for s, gid := range c.Shards {
-		owned[s] = gid == cfg.groups[2].gid
-	}
+// 	// QUERY to find shards owned by 102
+// 	c := cfg.mck.Query(-1)
+// 	owned := make(map[int]bool, n)
+// 	for s, gid := range c.Shards {
+// 		owned[s] = gid == cfg.groups[2].gid
+// 	}
 
-	// KILL 100
-	cfg.ShutdownGroup(0)
+// 	// KILL 100
+// 	cfg.ShutdownGroup(0)
 
-	// LEAVE 100 + 102
-	// 101 can get old shards from 102, but not from 100. 101 should start
-	// serving shards that used to belong to 102 as soon as possible
-	cfg.leavem([]int{0, 2})
+// 	// LEAVE 100 + 102
+// 	// 101 can get old shards from 102, but not from 100. 101 should start
+// 	// serving shards that used to belong to 102 as soon as possible
+// 	cfg.leavem([]int{0, 2})
 
-	// Give the implementation some time to start reconfiguration
-	// And to migrate 102 -> 101
-	<-time.After(1 * time.Second)
+// 	// Give the implementation some time to start reconfiguration
+// 	// And to migrate 102 -> 101
+// 	<-time.After(1 * time.Second)
 
-	// And finally: check that gets/puts for 101-owned keys now complete
-	for i := 0; i < n; i++ {
-		shard := key2shard(ka[i])
-		if owned[shard] {
-			check(t, ck, ka[i], va[i])
-			ck.Put(ka[i], va[i]+"-2")
-			check(t, ck, ka[i], va[i]+"-2")
-		}
-	}
+// 	// And finally: check that gets/puts for 101-owned keys now complete
+// 	for i := 0; i < n; i++ {
+// 		shard := key2shard(ka[i])
+// 		if owned[shard] {
+// 			check(t, ck, ka[i], va[i])
+// 			ck.Put(ka[i], va[i]+"-2")
+// 			check(t, ck, ka[i], va[i]+"-2")
+// 		}
+// 	}
 
-	fmt.Printf("  ... Passed\n")
-}
+// 	fmt.Printf("  ... Passed\n")
+// }

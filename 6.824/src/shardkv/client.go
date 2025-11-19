@@ -68,21 +68,18 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Request(key string, value string, act Operation) string {
 	args := ReqArg{
 		Key:   key,
-		Value: value,
+		Value: []byte(value),
 		Op:    act,
 		Cid:   ck.cid,
 		Seq:   atomic.AddInt64(&ck.seq, 1),
 	}
 
-	for ck.config.Num == 0 {
-		// ask controler for the latest configuration.
-		ck.config = ck.sm.Query(-1)
-		time.Sleep(100 * time.Millisecond)
-	}
+	// ask controler for the latest configuration.
+	ck.config = ck.sm.Query(-1)
 
 	var reply Reply
 	shard := key2shard(key)
-	// fmt.Printf("Client:%v, Request, key:%v, act:%v, shard:%v, leader:%v \n", ck.cid, key, act, shard, ck.shardsLeader[shard])
+	// fmt.Printf("Client start:%v, Request, key:%v, act:%v, shard:%v, leader:%v, gid:%v, config:%v \n", ck.cid, key, act, shard, ck.shardsLeader[shard], ck.config.Shards[shard], ck.config.Num)
 
 	for {
 		reply = Reply{}
@@ -106,14 +103,32 @@ func (ck *Clerk) Request(key string, value string, act Operation) string {
 			time.Sleep(100 * time.Millisecond)
 			// ask controler for the latest configuration.
 			ck.config = ck.sm.Query(-1)
-			continue
+			goto Continue
 		}
+		if reply.Err == ErrWaitingSyncShard {
+			// don't need to increase seq, because we haven't update seq if it's syncing.
+			time.Sleep(100 * time.Millisecond)
+			goto Continue
+		}
+		if reply.Err == ErrReqOutdated { // it'll never happend for OpGet, OpPut and OpAppend, but we put it here for completeness
+			time.Sleep(100 * time.Millisecond)
+			args.Seq = atomic.AddInt64(&ck.seq, 1)
+			goto Continue
+		}
+		// when not ok, we must change leader, because it mean the chosen leader is down.
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrRetry {
 			time.Sleep(50 * time.Millisecond)
 			ck.shardsLeader[shard] = (ck.shardsLeader[shard] + 1) % len(servers)
 			// DPrintf("Client:%v, Seq:%v, Request shard %v gid %v try next leader %v", ck.cid, ck.seq, shard, gid, ck.shardsLeader[shard])
 		}
+
+	Continue:
+		// time.Sleep(time.Millisecond * 500)
+		// fmt.Printf("Client error:%v, key:%v, act:%v, shard:%v, gid:%v,config:%v, got replyErr:%v, ok:%v \n", ck.cid, key, act, shard, gid, ck.config.Num, reply.Err, ok)
+
+		continue
 	}
+	// fmt.Printf("Client:%v, Request done, key:%v, act:%v, shard:%v, leader:%v \n", ck.cid, key, act, shard, ck.shardsLeader[shard])
 	return reply.Value
 }
 
