@@ -118,7 +118,8 @@ type Raft struct {
 	SnapshotState     []byte
 
 	// for lab4D debug
-	gid int
+	gid   int
+	debug bool
 }
 
 // return currentTerm and whether this server
@@ -235,7 +236,7 @@ func (rf *Raft) sendInstallSnapShot(server int, args *RequestInstallSnapshot, re
 	// Leader can only get this response after the follower successfully processes condInstallSnapshot. So, we don't need to worry that RequestInstallSnapshot is successfully, but condInstallSnapshot failed.
 	// But condInstallSnapshot is called by another go routine and maybe called between another appendEntries RPC, so we need to make sure the condInstallSnapshot is Idempotent to handle old condInstallSnapshot RPCs.
 	if reply.Success && rf.role == Leader {
-		DPrintf("leader:%v, got applySnapshot success from peer:%v, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, server, rf.LastIncludedIndex, rf.LastIncludedTerm)
+		rf.DPrintfRaft("leader:%v, got applySnapshot success from peer:%v, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, server, rf.LastIncludedIndex, rf.LastIncludedTerm)
 
 		rf.nextIndex[server] = args.LastIncludedIndex + 1
 		rf.matchIndex[server] = args.LastIncludedIndex
@@ -245,8 +246,8 @@ func (rf *Raft) sendInstallSnapShot(server int, args *RequestInstallSnapshot, re
 func (rf *Raft) RequestInstallSnapshot(args *RequestInstallSnapshot, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("leader:%v, RequestInstallSnapshot to peer: %v, lastIncludedIndex:%v, lastIncludedTerm:%v, myLastIncIdx:%v, myLastIncTerm:%v", args.LeaderID, rf.me, args.LastIncludedIndex, args.LastIncludedTerm, rf.LastIncludedIndex, rf.LastIncludedTerm)
-	fmt.Printf("group: %v, leader:%v, RequestInstallSnapshot to peer: %v, lastIncludedIndex:%v, lastIncludedTerm:%v, myLastIncIdx:%v, myLastIncTerm:%v\n", rf.gid, args.LeaderID, rf.me, args.LastIncludedIndex, args.LastIncludedTerm, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	rf.DPrintfRaft("leader:%v, RequestInstallSnapshot to peer: %v, lastIncludedIndex:%v, lastIncludedTerm:%v, myLastIncIdx:%v, myLastIncTerm:%v", args.LeaderID, rf.me, args.LastIncludedIndex, args.LastIncludedTerm, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	// fmt.Printf("group:%v, leader:%v, RequestInstallSnapshot to peer: %v, lastIncludedIndex:%v, lastIncludedTerm:%v, myLastIncIdx:%v, myLastIncTerm:%v, reqTerm:%v, curTerm:%v\n", rf.gid, args.LeaderID, rf.me, args.LastIncludedIndex, args.LastIncludedTerm, rf.LastIncludedIndex, rf.LastIncludedTerm, args.Term, rf.CurrentTerm)
 	reply.Term = rf.CurrentTerm
 	reply.Success = false
 
@@ -278,8 +279,8 @@ func (rf *Raft) RequestInstallSnapshot(args *RequestInstallSnapshot, reply *Inst
 		Term:          args.Term,
 		LeaderId:      args.LeaderID,
 	})
-	DPrintf("peer %v, applySnapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
-	fmt.Printf("group:%v, peer %v, applySnapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.gid, rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	rf.DPrintfRaft("peer %v, applySnapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	// fmt.Printf("group:%v, peer %v, applySnapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v, reqTerm:%v, curTerm:%v\n", rf.gid, rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm, args.Term, rf.CurrentTerm)
 
 	// Add dummy applyMsg to make sure Snapshot is installed before this RPC.
 	msgs = append(msgs, ApplyMsg{
@@ -330,7 +331,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedCmdIndex i
 	// - RequestAppendEntries: prevLogIndex: 50, leaderCommit: 60, rf.LastIncludedIndex = 58
 	//	 	- We'll commit logIndex 51 (real) with false index: 59
 	// Solution: set commitIndex in RequestInstallSnapshot, before CondInstallSnapshot. So, old requestAppendEntriesRPC would be rejected.
-	DPrintf("server %v, condInstall snapshot start, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	rf.DPrintfRaft("server %v, condInstall snapshot start, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
 
 	lastIncludedLogIndex := cmdIndexToLogIndex(lastIncludedCmdIndex)
 
@@ -347,7 +348,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedCmdIndex i
 	rf.LastIncludedTerm = lastIncludedTerm
 	// also update commit index to avoid relativeLogIndex <0 in requestAppendRPC ( relativeIndex := i(commitIndex+1) - rf.LastIncludedIndex - 1)
 	rf.commitIndex = lastIncludedLogIndex
-	DPrintf("server %v, condInstall snapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	rf.DPrintfRaft("server %v, condInstall snapshot success, lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm)
 	rf.persistSnapShot()
 
 	return true
@@ -368,7 +369,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// 			=> case 3.1 another RPC trigger Snapshot: set lastIncludedIndex: 58 => nothing bad happens, because all works has been done.
 	// 			=> case 3.2 appendEntries: commit 51 with 51 => Snapshot triggerd by another AppendRPC (when it's the last msg): set lastIncludedIndex: 58, trim rf.Log => appendEntries panics duo to trimed log out of range.
 	// 				=> solution: reject appendEntries RPC's whose prevLog index is less than rf.commitIndex (because this must has been set by another RPC, because it acquired the lock before).
-	DPrintf("server %v, snapshot index: %v, before,lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, index, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	rf.DPrintfRaft("server %v, snapshot index: %v, before,lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, index, rf.LastIncludedIndex, rf.LastIncludedTerm)
 
 	// index is the lastCmd logIndex+1, so we have decrease it by 1 first
 	lastIncludedLogIndex := cmdIndexToLogIndex(index)
@@ -381,7 +382,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.LastIncludedIndex = lastIncludedLogIndex
 	rf.Log = rf.Log[logIndex+1:]
 	rf.SnapshotState = snapshot
-	DPrintf("server %v, snapshot index: %v, after,lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, index, rf.LastIncludedIndex, rf.LastIncludedTerm)
+	rf.DPrintfRaft("server %v, snapshot index: %v, after,lastIncludedIndex: %v, lastIncludedTerm: %v", rf.me, index, rf.LastIncludedIndex, rf.LastIncludedTerm)
 
 	rf.persistSnapShot()
 }
@@ -413,7 +414,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *AppendEntriesReply) {
 	ok := rf.peers[server].Call("Raft.RequestAppendEntries", args, reply)
-	// DPrintf("leader %v, RequestAppendEntries reply from server: %v, success: %v", rf.me, server, reply.Success)
+	// rf.DPrintfRaft("leader %v, RequestAppendEntries reply from server: %v, success: %v", rf.me, server, reply.Success)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -426,7 +427,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 	}
 
 	if rf.role != Leader || !ok {
-		// DPrintf("reply timeout, from peer: %v, Xterm: %v, Xindex: %v", server, reply.Xterm, reply.Xindex)
+		// rf.DPrintfRaft("reply timeout, from peer: %v, Xterm: %v, Xindex: %v", server, reply.Xterm, reply.Xindex)
 		return
 	}
 
@@ -434,13 +435,13 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 		// update nextIndex and matchIndex
 		nextIndex := args.PrevLogIndex + 1 + len(args.Entries)
 		if nextIndex < rf.nextIndex[server] { // drop old RPCs to avoid nextIndex roll back
-			DPrintf("leader:%v, drop old reply success from peer: %v, prevNextIndex: %v, newNextIndex(old): %v", rf.me, server, rf.nextIndex[server], nextIndex)
+			rf.DPrintfRaft("leader:%v, drop old reply success from peer: %v, prevNextIndex: %v, newNextIndex(old): %v", rf.me, server, rf.nextIndex[server], nextIndex)
 			return
 		}
 		rf.nextIndex[server] = nextIndex
 		rf.matchIndex[server] = nextIndex - 1
-		DPrintf("leader:%v, got reply success from peer: %v, prevLogIndex: %v, newLogIndex: %v, entries: %v", rf.me, server, args.PrevLogIndex, rf.nextIndex[server], len(args.Entries))
-		DPrintf("leader:%v,check commitIndex for peer: %v, commitIndex: %v, matchIndex: %v", rf.me, server, rf.commitIndex, rf.matchIndex)
+		rf.DPrintfRaft("leader:%v, got reply success from peer: %v, prevLogIndex: %v, newLogIndex: %v, entries: %v", rf.me, server, args.PrevLogIndex, rf.nextIndex[server], len(args.Entries))
+		rf.DPrintfRaft("leader:%v,check commitIndex for peer: %v, commitIndex: %v, matchIndex: %v", rf.me, server, rf.commitIndex, rf.matchIndex)
 
 		// update commitIndex
 		for i := len(rf.Log) + rf.LastIncludedIndex; i > rf.commitIndex; i-- {
@@ -459,7 +460,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 					for commitedInd := rf.commitIndex + 1; commitedInd <= i; commitedInd++ {
 						cmd := rf.Log[commitedInd-rf.LastIncludedIndex-1].Cmd
 						commitedInd := logIndexToApplyChIndex(commitedInd)
-						DPrintf("leader %v, applyCh: %v", rf.me, commitedInd)
+						rf.DPrintfRaft("leader %v, applyCh: %v", rf.me, commitedInd)
 						msgs = append(msgs, ApplyMsg{
 							CommandValid: true,
 							Command:      cmd,
@@ -481,7 +482,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 					// copy msgs first, then apply msgs to applyCh. Cause we might trigger snapshoting and trim the log when we're applying the msgs.
 					// must process it during lock to avoid out of order apply by another RPC.
 					rf.commitIndex = i // must set it before applyCh to avoid rf.killed cause earlier return
-					DPrintf("leader %v, set commit index: %v", rf.me, logIndexToApplyChIndex(i))
+					rf.DPrintfRaft("leader %v, set commit index: %v", rf.me, logIndexToApplyChIndex(i))
 					for _, msg := range msgs {
 						select {
 						case rf.applyCh <- msg:
@@ -496,9 +497,9 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 				}
 			}
 		}
-		DPrintf("check commitIndex done, leader:%v, matchIndex: %v", rf.me, rf.matchIndex)
+		rf.DPrintfRaft("check commitIndex done, leader:%v, matchIndex: %v", rf.me, rf.matchIndex)
 	} else if reply.Xterm != -2 {
-		DPrintf("reply mismatch, from peer: %v, Xterm: %v, Xindex: %v, prevIdx:%v, prevTerm:%v, myLastIncIdx:%v", server, reply.Xterm, reply.Xindex, args.PrevLogIndex, args.PrevLogTerm, rf.LastIncludedIndex)
+		rf.DPrintfRaft("reply mismatch, from peer: %v, Xterm: %v, Xindex: %v, prevIdx:%v, prevTerm:%v, myLastIncIdx:%v", server, reply.Xterm, reply.Xindex, args.PrevLogIndex, args.PrevLogTerm, rf.LastIncludedIndex)
 		// Although, ok is true and reply.Success is false, we still have to check Xterm!=-2, cause RPC might early return our response before the reply is fully set in requestAppendEntries.
 		// If AppendEntries fails because of log inconsistency, do quick recovery.
 		// Must be ok, or it'll reset nextIndex if timeout due to the target peer is disconnected.
@@ -528,7 +529,7 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 			}
 		}
 	} else {
-		DPrintf("reply false, from peer: %v, Xterm: %v, Xindex: %v", server, reply.Xterm, reply.Xindex)
+		rf.DPrintfRaft("reply false, from peer: %v, Xterm: %v, Xindex: %v", server, reply.Xterm, reply.Xindex)
 	}
 	// else, timeout shoule be retried in sendHeartBeats, but don't retry here cause leader might has changed.
 }
@@ -547,7 +548,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("leader:%v, RequestAppendEntries to peer: %v,prevIndex:%v,prevTerm:%v, prevCommit:%v,leaderTerm:%v,entries:%v, under mycommitIndex: %v, myterm: %v, myIncIdx:%v", args.LeaderId, rf.me, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, len(args.Entries), rf.commitIndex, rf.CurrentTerm, rf.LastIncludedIndex)
+	rf.DPrintfRaft("leader:%v, RequestAppendEntries to peer: %v,prevIndex:%v,prevTerm:%v, prevCommit:%v,leaderTerm:%v,entries:%v, under mycommitIndex: %v, myterm: %v, myIncIdx:%v", args.LeaderId, rf.me, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, len(args.Entries), rf.commitIndex, rf.CurrentTerm, rf.LastIncludedIndex)
 
 	reply.Success = false
 	reply.Term = rf.CurrentTerm
@@ -558,7 +559,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 	//  To avoid this race condition:
 	// 			appendEnriesRPC A -> commit during A with index 58 => appendRPC B with LastIncludedIndex=50 => Snapshot called trigged by RPC A => commit during RPC B (LastIncludedIndex changed to 58)
 	// We must ensure snapshot is done before the next AppendEntries RPC, so we add an invalid command to applyCh.
-	if args.Term < rf.CurrentTerm || args.PrevLogIndex < rf.LastIncludedIndex || args.LeaderCommit < rf.LastIncludedIndex {
+	if args.Term < rf.CurrentTerm || args.PrevLogIndex < rf.LastIncludedIndex {
 		return
 	}
 
@@ -571,6 +572,17 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 	if args.Term > rf.CurrentTerm {
 		rf.VotedFor = -1
 	}
+
+	// we must't use the following check to avoid unneccesary update, because there are cases leader's log is larger than follower's log, but leader's commitIndex is smaller than follower's.
+	// e.g:
+	// leader1: append Log 10 to follower 2, 3; then commit Log 10 on leader 1 and follower 2; follower 2 snapshoted log 10.
+	// leader 1 dies and follower 3 becomes leader (leader commit is 9);
+	// follower 3's leader commit is only 9, but follower 2's LastIncludedIndex is 10:
+	// - if we check it before set lastLive and return, then follower 2's lastLive won't be updated, then it'll start election again.
+	// - if we check it after set lastLive, then follower 2's lastLive is updated, but it'll reject the AppendEntries RPC, then follower 2 can't sync log with follower 3. Thus, raft consensus will get stucked, thus never move forward.
+	// if args.LeaderCommit < rf.LastIncludedIndex { // never do this!
+	// 	return
+	// }
 
 	// cond:2
 	if args.PrevLogIndex > -1 && args.PrevLogIndex != rf.LastIncludedIndex { // snapShoted lastIncludedIndex must be equal, because lastIncludedIndex can only be committed by the majority
@@ -648,14 +660,14 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 			Term:         args.Term,
 			LeaderId:     args.LeaderId,
 		})
-		DPrintf("follower:%v,  set commit index: %v", rf.me, logIndexToApplyChIndex(commitIndex))
+		rf.DPrintfRaft("follower:%v,  set commit index: %v", rf.me, logIndexToApplyChIndex(commitIndex))
 		// must set it before applyCh to avoid rf.killed cause earlier return
 		rf.commitIndex = commitIndex
 		// must block to avoid out of order apply
 		for _, msg := range msgs {
 			select {
 			case rf.applyCh <- msg:
-				DPrintf("follower:%v, apply msg, applyCmd: %v, cmdIndex: %v, valid:%v", rf.me, msg.Command, msg.CommandIndex, msg.CommandValid)
+				rf.DPrintfRaft("follower:%v, apply msg, applyCmd: %v, cmdIndex: %v, valid:%v", rf.me, msg.Command, msg.CommandIndex, msg.CommandValid)
 				continue
 			case <-rf.ctx.Done(): // to avoid goroutine memory leak
 				return
@@ -663,7 +675,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntry, reply *AppendEntr
 		}
 	}
 	// TODO: Allservers update lastApplied and apply log[lastApplied] to state machine
-	DPrintf("leader:%v, RequestAppendEntries success in peer: %v,prevIndex:%v,prevTerm:%v, prevCommit:%v,leaderTerm:%v,entries:%v,under mycommitIndex: %v, myterm: %v, myLog: %v", args.LeaderId, rf.me, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, len(args.Entries), rf.commitIndex, rf.CurrentTerm, len(rf.Log))
+	rf.DPrintfRaft("leader:%v, RequestAppendEntries success in peer: %v,prevIndex:%v,prevTerm:%v, prevCommit:%v,leaderTerm:%v,entries:%v,under mycommitIndex: %v, myterm: %v, myLog: %v", args.LeaderId, rf.me, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, len(args.Entries), rf.commitIndex, rf.CurrentTerm, len(rf.Log))
 	reply.Success = true
 }
 
@@ -696,8 +708,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	lastTerm, lastIndex := rf.LastLog()
-	DPrintf("server %v, get requestVote: %v, curTerm:%v, lastTerm:%v, lastIndex:%v,role:%v,votedFor:%v", rf.me, args, rf.CurrentTerm, lastTerm, lastIndex, rf.role, rf.VotedFor)
-	fmt.Printf("group: %v, server %v, get requestVote: %v, curTerm:%v, lastTerm:%v, lastIndex:%v,role:%v,votedFor:%v\n", rf.gid, rf.me, args, rf.CurrentTerm, lastTerm, lastIndex, rf.role, rf.VotedFor)
+	rf.DPrintfRaft("server %v, get requestVote: %v, curTerm:%v, lastTerm:%v, lastIndex:%v,role:%v,votedFor:%v", rf.me, args, rf.CurrentTerm, lastTerm, lastIndex, rf.role, rf.VotedFor)
+	// fmt.Printf("group:%v, server %v, get requestVote: %v, curTerm:%v, lastTerm:%v, lastIndex:%v,role:%v,votedFor:%v\n", rf.gid, rf.me, args, rf.CurrentTerm, lastTerm, lastIndex, rf.role, rf.VotedFor)
 	reply.VoteGranted = false
 
 	reply.Term = rf.CurrentTerm
@@ -766,7 +778,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	DPrintf("send requestVote from: %v, to :%v, term: %v", rf.me, server, rf.CurrentTerm)
+	rf.DPrintfRaft("send requestVote from: %v, to :%v, term: %v", rf.me, server, rf.CurrentTerm)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -808,7 +820,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Cmd:   command,
 	}
 
-	DPrintf("leader:%v append log:%v", rf.me, newLog)
+	rf.DPrintfRaft("leader:%v append log:%v", rf.me, newLog)
 	// update log
 	rf.Log = append(rf.Log, newLog)
 
@@ -963,8 +975,8 @@ func (rf *Raft) kickOffLeaderElection(electionTimeout time.Duration) {
 				mu.Lock()
 				defer mu.Unlock()
 				if ok && reply.VoteGranted {
-					DPrintf("server %v got vote from %v, reply: %v", rf.me, server, reply)
-					fmt.Printf("group: %v, server %v got vote from %v, reply: %v\n", rf.gid, rf.me, server, reply)
+					rf.DPrintfRaft("server %v got vote from %v, reply: %v", rf.me, server, reply)
+					// fmt.Printf("group:%v, server %v got vote from %v, reply: %v\n", rf.gid, rf.me, server, reply)
 					totalVotes += 1
 				}
 				finished += 1
@@ -974,16 +986,17 @@ func (rf *Raft) kickOffLeaderElection(electionTimeout time.Duration) {
 
 		cond.L.Lock()
 		for totalVotes < (len(rf.peers)/2+1) && finished != len(rf.peers) {
-			DPrintf("candidate: %v, total votes: %v, finished: %v", rf.me, totalVotes, finished)
+			rf.DPrintfRaft("candidate: %v, total votes: %v, finished: %v", rf.me, totalVotes, finished)
 			cond.Wait()
 		}
+		cond.L.Unlock()
 
 		if totalVotes > len(rf.peers)/2 {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if rf.role == Candicate && rf.CurrentTerm == term && time.Since(start) < electionTimeout {
-				DPrintf("peer: %v, selected as leader", rf.me)
-				fmt.Println("group:", rf.gid, "peer:", rf.me, "become leader")
+				rf.DPrintfRaft("peer: %v, selected as leader", rf.me)
+				// fmt.Printf("group:%v, peer: %v, become leader\n", rf.gid, rf.me)
 				rf.role = Leader
 				// shouldn't reset votedFor=-1 here, cause we don't allow for voting for other candidates in the same term.
 				rf.nextIndex = make([]int, len(rf.peers))
@@ -1013,8 +1026,6 @@ func (rf *Raft) kickOffLeaderElection(electionTimeout time.Duration) {
 			}
 
 		}
-		cond.L.Unlock()
-
 	}()
 }
 
@@ -1040,7 +1051,7 @@ func (rf *Raft) ticker() {
 		// start new election
 		rf.mu.Lock()
 		if rf.lastLive.Before(start) && rf.role != Leader {
-			DPrintf("ticking, server: %v, role: %v, term: %v, start election", rf.me, rf.role, rf.CurrentTerm)
+			rf.DPrintfRaft("ticking, server: %v, role: %v, term: %v, start election", rf.me, rf.role, rf.CurrentTerm)
 			go rf.kickOffLeaderElection(electionTimeout)
 
 		}
@@ -1099,7 +1110,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	Debug = debug
 
-	DPrintf("follower: %v, Candicate: %v, leader:%v", Follower, Candicate, Leader)
+	rf.DPrintfRaft("follower: %v, Candicate: %v, leader:%v", Follower, Candicate, Leader)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
@@ -1149,9 +1160,9 @@ func MakeWithGid(peers []*labrpc.ClientEnd, me int,
 		rf.matchIndex[i] = -1
 	}
 
-	Debug = debug
+	rf.debug = debug
 
-	DPrintf("follower: %v, Candicate: %v, leader:%v", Follower, Candicate, Leader)
+	rf.DPrintfRaft("peer:%v, role: %v", rf.me, rf.role)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
