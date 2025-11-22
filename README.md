@@ -1,3 +1,6 @@
+- [x] Passed all Lab2–Lab4 Raft-related tests 400 times each with no goroutine memory leaks.
+- [x] Fixed memory leak issues in the original Raft homework tests.
+
 ## References
 - [Video](https://www.bilibili.com/video/BV1R7411t71W)
 - https://github.com/chaozh/MIT-6.824
