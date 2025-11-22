@@ -3,12 +3,16 @@ package shardkv
 import (
 	"fmt"
 	"io/ioutil"
+	"log"
 	"math/rand"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	_ "net/http/pprof"
 
 	"6.824/models"
 	"6.824/porcupine"
@@ -62,7 +66,8 @@ func TestStaticShards(t *testing.T) {
 	cfg.ShutdownGroup(1)
 	cfg.checklogs() // forbid snapshots
 
-	ch := make(chan string)
+	// must use n channel, or the goroutine may block forever, thus cause OOM when running multiple tests.
+	ch := make(chan string, n)
 	for xi := 0; xi < n; xi++ {
 		ck1 := cfg.makeClient() // only one call allowed per client
 		go func(i int) {
@@ -92,6 +97,7 @@ func TestStaticShards(t *testing.T) {
 	}
 
 	if ndone != 5 {
+		panic(fmt.Sprintf("expected 5 completions with one shard dead; got %v\n", ndone))
 		t.Fatalf("expected 5 completions with one shard dead; got %v\n", ndone)
 	}
 
@@ -1012,3 +1018,9 @@ func TestUnreliable3(t *testing.T) {
 
 // 	fmt.Printf("  ... Passed\n")
 // }
+
+func init() {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+}
