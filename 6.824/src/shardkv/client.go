@@ -10,6 +10,7 @@ package shardkv
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
 	"sync/atomic"
 	"time"
@@ -42,9 +43,9 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
-	cid          int64
-	seq          int64       // sequence number for each client
-	shardsLeader map[int]int // shard -> leader index
+	cid         int64
+	seq         int64       // sequence number for each client
+	groupLeader map[int]int // gid -> leader index
 }
 
 // the tester calls MakeClerk.
@@ -59,7 +60,7 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
-	ck.shardsLeader = make(map[int]int)
+	ck.groupLeader = make(map[int]int)
 	ck.cid = nrand()
 	ck.seq = 0
 	return ck
@@ -79,46 +80,50 @@ func (ck *Clerk) Request(key string, value string, act Operation) string {
 
 	var reply Reply
 	shard := key2shard(key)
-	// fmt.Printf("Client start:%v, Request, key:%v, act:%v, shard:%v, leader:%v, gid:%v, config:%v \n", ck.cid, key, act, shard, ck.shardsLeader[shard], ck.config.Shards[shard], ck.config.Num)
+	fmt.Printf("Client start:%v, Request, key:%v, act:%v, shard:%v, leader:%v, gid:%v, config:%v \n", ck.cid, key, act, shard, ck.groupLeader[shard], ck.config.Shards[shard], ck.config.Num)
 
-	for {
+	start := time.Now()
+
+	// use timeouts to handle killed shardctrler (e.g static testing), or this cmd will loop infinitely and never return, which causes OOM if run it multiple rounds.
+	for time.Since(start) < 10*time.Second {
 		reply = Reply{}
 
 		gid := ck.config.Shards[shard]
 		servers, exists := ck.config.Groups[gid]
 		if !exists {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			// ask controler for the latest configuration.
 			ck.config = ck.sm.Query(-1)
 			continue
 		}
-		leader := ck.shardsLeader[shard]
+		leader := ck.groupLeader[gid]
 
 		srv := ck.make_end(servers[leader])
 		ok := srv.Call("ShardKV.Request", &args, &reply)
 		if ok && reply.Err == "" {
 			break
 		}
+
 		if reply.Err == ErrWrongGroup {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			// ask controler for the latest configuration.
 			ck.config = ck.sm.Query(-1)
 			goto Continue
 		}
 		if reply.Err == ErrWaitingSyncShard {
 			// don't need to increase seq, because we haven't update seq if it's syncing.
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			goto Continue
 		}
 		if reply.Err == ErrReqOutdated { // it'll never happend for OpGet, OpPut and OpAppend, but we put it here for completeness
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			args.Seq = atomic.AddInt64(&ck.seq, 1)
 			goto Continue
 		}
 		// when not ok, we must change leader, because it mean the chosen leader is down.
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrRetry {
 			time.Sleep(50 * time.Millisecond)
-			ck.shardsLeader[shard] = (ck.shardsLeader[shard] + 1) % len(servers)
+			ck.groupLeader[gid] = (ck.groupLeader[gid] + 1) % len(servers)
 			// DPrintf("Client:%v, Seq:%v, Request shard %v gid %v try next leader %v", ck.cid, ck.seq, shard, gid, ck.shardsLeader[shard])
 		}
 
@@ -128,7 +133,8 @@ func (ck *Clerk) Request(key string, value string, act Operation) string {
 
 		continue
 	}
-	// fmt.Printf("Client:%v, Request done, key:%v, act:%v, shard:%v, leader:%v \n", ck.cid, key, act, shard, ck.shardsLeader[shard])
+	gid := ck.config.Shards[shard]
+	fmt.Printf("Client:%v, Request done, key:%v, act:%v, shard:%v,group:%v, leader:%v \n", ck.cid, key, act, shard, gid, ck.groupLeader[gid])
 	return reply.Value
 }
 

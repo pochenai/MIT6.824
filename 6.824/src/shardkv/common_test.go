@@ -3,6 +3,7 @@ package shardkv
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -111,4 +112,15 @@ func TestDecode(t *testing.T) {
 	}
 	kv.config = tempConfig
 	fmt.Println(kv)
+}
+
+func TestKey2Shards(t *testing.T) {
+	n := 10
+	ka := make([]string, n)
+	for i := 0; i < n; i++ {
+		ka[i] = strconv.Itoa(i) // ensure multiple shards
+
+		shard := key2shard(ka[i])
+		fmt.Println("i:", i, "key:", ka[i], "shard:", shard)
+	}
 }

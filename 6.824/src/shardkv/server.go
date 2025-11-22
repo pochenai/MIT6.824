@@ -75,11 +75,6 @@ func (kv *ShardKV) applyCmds() {
 			}
 
 			op := msg.Command.(ReqArg)
-
-			// 单纯为了leader推进commitIndex，不做任何操作
-			if op.Op == OpEmpty {
-				continue
-			}
 			// leader and follower both have state, don't forget to set follower's state
 			var result Result
 			var shard int
@@ -88,9 +83,8 @@ func (kv *ShardKV) applyCmds() {
 			// only update shardMoveSeq when moveShards success, or we'll let the client retry and process it again.
 			// if we update shardMoveSeq even if not success, the command will not be processed again, which caused the server never updated to new config.
 			if op.Op == OpMoveShards {
-				prevConfig := op.PrevNextConfig
 				nextConfig := op.NextConfig
-				prevNewNum := prevConfig.Num
+				prevNewNum := nextConfig.Num - 1
 				currentNum := kv.config.Num
 
 				if msg.LeaderId == kv.me {
@@ -118,7 +112,7 @@ func (kv *ShardKV) applyCmds() {
 						} else {
 							for _, s := range nextConfig.ShardsForGID(kv.gid) {
 								// only set previous owned shards to be avaliable
-								if slices.Contains(prevConfig.ShardsForGID(kv.gid), s) {
+								if slices.Contains(kv.config.ShardsForGID(kv.gid), s) {
 									kv.avaliableShards[s] = true
 								}
 							}
@@ -157,10 +151,10 @@ func (kv *ShardKV) applyCmds() {
 
 			if op.Op == OpUpdateShardsState {
 				nextConfig := op.NextConfig
-				prevConfig := op.PrevNextConfig
+				prevConfigNum := nextConfig.Num - 1
 
 				if msg.LeaderId == kv.me {
-					DPrintf("=====syncing group:%v,fromG:%v,peer:%v,leader:%v,term:%v,cmdIndex:%v,updateshards, latest:%v, prevLastest:%v,current:%v,opState:%v,synced:%v, processed:%v", kv.gid, op.FromGid, kv.me, msg.LeaderId, msg.Term, msg.CommandIndex, nextConfig.Num, prevConfig.Num, kv.config.Num, op.State, kv.synced(&kv.config), op.Seq > kv.shardMoveSeq[op.Cid])
+					DPrintf("=====syncing group:%v,fromG:%v,peer:%v,leader:%v,term:%v,cmdIndex:%v,updateshards, latest:%v, prevLastest:%v,current:%v,opState:%v,synced:%v, processed:%v", kv.gid, op.FromGid, kv.me, msg.LeaderId, msg.Term, msg.CommandIndex, nextConfig.Num, prevConfigNum, kv.config.Num, op.State, kv.synced(&kv.config), op.Seq > kv.shardMoveSeq[op.Cid])
 				}
 				// update的操作是非幂等的，因为可能会导致旧状态覆盖新状态，所以需要过滤重复请求
 				if op.Seq <= kv.shardMoveSeq[op.Cid] {
@@ -313,14 +307,37 @@ func (kv *ShardKV) Request(args *ReqArg, reply *Reply) {
 		}
 	}
 
-	if args.Op == OpMoveShards || args.Op == OpUpdateShardsState {
+	if args.Op == OpMoveShards {
 		// for simple: we just let the client retry with newid;
 		// TODO optimization: calculate the result and reply
+		if args.NextConfig.Num-1 > kv.config.Num || (args.NextConfig.Num-1 == kv.config.Num && !kv.synced(&kv.config)) {
+			reply.Err = ErrWaitingSyncShard
+			kv.mu.RUnlock()
+			return
+		}
+
+		if args.FromGid == kv.gid && args.NextConfig.Num < kv.config.Num {
+			reply.Err = ErrAlreadyUpdated
+			kv.mu.RUnlock()
+			return
+		}
+
 		if args.Seq <= kv.shardMoveSeq[args.Cid] {
-			if args.Op == OpMoveShards {
-				// it means the request succeed for OpUpdateShardsState, so we don't need to set err. But OpMoveShards requires reply.ShardState, so it needs to retry
-				reply.Err = ErrReqOutdated
-			}
+			// it means the request succeed for OpUpdateShardsState, so we don't need to set err. But OpMoveShards requires reply.ShardState, so it needs to retry
+			reply.Err = ErrReqOutdated
+			kv.mu.RUnlock()
+			return
+		}
+	}
+
+	if args.Op == OpUpdateShardsState {
+		if args.FromGid == kv.gid && args.NextConfig.Num < kv.config.Num {
+			reply.Err = ErrAlreadyUpdated
+			kv.mu.RUnlock()
+			return
+		}
+
+		if args.Seq <= kv.shardMoveSeq[args.Cid] {
 			kv.mu.RUnlock()
 			return
 		}
@@ -464,13 +481,12 @@ func (kv *ShardKV) shardsToSyncForNextCfg(nextNum int) (map[int]ReqArg, shardctr
 	reqArgs := make(map[int]ReqArg, len(syncGrpShards))
 	for gid, shards := range syncGrpShards {
 		reqArgs[gid] = ReqArg{
-			Cid:            kv.cid,
-			Seq:            atomic.AddInt64(&kv.seq, 1),
-			Op:             OpMoveShards,
-			FromGid:        kv.gid,
-			NextConfig:     nextCfg.Clone(),
-			PrevNextConfig: prevNextConfig.Clone(),
-			Shards:         shards,
+			Cid:        kv.cid,
+			Seq:        atomic.AddInt64(&kv.seq, 1),
+			Op:         OpMoveShards,
+			FromGid:    kv.gid,
+			NextConfig: nextCfg.Clone(),
+			Shards:     shards,
 		}
 	}
 
@@ -481,9 +497,16 @@ func (kv *ShardKV) shardsToSyncForNextCfg(nextNum int) (map[int]ReqArg, shardctr
 func (kv *ShardKV) pullShards(nextNum int) error {
 	movePrevShardsArgs, nextCfg, prevNextConfig := kv.shardsToSyncForNextCfg(nextNum)
 
+	if prevNextConfig.Num == -1 {
+		return errors.New(ErrCtrlerKilled)
+	}
+
 	updateShardsFn := func(updateArg *ReqArg) Reply {
 		var reply Reply
 		for {
+			if kv.killed() {
+				return Reply{Err: ErrKilled}
+			}
 			reply = Reply{}
 			kv.Request(updateArg, &reply)
 
@@ -495,7 +518,7 @@ func (kv *ShardKV) pullShards(nextNum int) error {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			if reply.Err == ErrWrongLeader { // leader changed, we should return
+			if reply.Err == ErrWrongLeader || reply.Err == ErrAlreadyUpdated { // leader changed, we should return; or the server will get stuck in this state and never move to the next config.
 				break
 			}
 		}
@@ -506,18 +529,17 @@ func (kv *ShardKV) pullShards(nextNum int) error {
 	if len(movePrevShardsArgs) == 0 {
 		DPrintf("=====syncing group:%v,peer:%v,pullShardsReq nothing, next:%v, prevNext:%v, current%v", kv.gid, kv.me, nextCfg, prevNextConfig, kv.config.Num)
 		updateShardsStateCmd := ReqArg{
-			Cid:            kv.cid,
-			Seq:            atomic.AddInt64(&kv.seq, 1),
-			Op:             OpUpdateShardsState,
-			FromGid:        kv.gid,
-			PrevNextConfig: prevNextConfig,
-			NextConfig:     nextCfg,
-			State:          make(map[int]ShardState),
+			Cid:        kv.cid,
+			Seq:        atomic.AddInt64(&kv.seq, 1),
+			Op:         OpUpdateShardsState,
+			FromGid:    kv.gid,
+			NextConfig: nextCfg,
+			State:      make(map[int]ShardState),
 		}
 
 		reply := updateShardsFn(&updateShardsStateCmd)
-		if reply.Err == ErrWrongLeader {
-			return errors.New(ErrWrongLeader)
+		if reply.Err == ErrWrongLeader || reply.Err == ErrAlreadyUpdated || reply.Err == ErrKilled {
+			return errors.New(string(reply.Err))
 		} else {
 			return nil
 		}
@@ -525,17 +547,24 @@ func (kv *ShardKV) pullShards(nextNum int) error {
 
 	// TODO: pull shards concurrently for each group
 	for gid, mvArg := range movePrevShardsArgs {
-		servers := mvArg.PrevNextConfig.Groups[gid]
+		servers := prevNextConfig.Groups[gid]
 		leader := 0
 		srv := kv.make_end(servers[leader])
 		DPrintf("=====syncing group:%v,peer:%v,pullShardsReq:%v toGid:%v, next:%v, prevNext:%v, current%v", kv.gid, kv.me, mvArg.Shards, gid, nextCfg, prevNextConfig, kv.config.Num)
 		var reply Reply
 		for {
+			if kv.killed() {
+				return errors.New(ErrKilled)
+			}
 			reply = Reply{}
 			ok := srv.Call("ShardKV.Request", &mvArg, &reply)
 
 			if ok && reply.Err == "" {
 				break
+			}
+
+			if reply.Err == ErrAlreadyUpdated {
+				return errors.New(ErrAlreadyUpdated)
 			}
 
 			// TODO: this common might is not needed. we must update the seq, because some larger seq might be processed before the currenct seq is processed, which caused the client never get the required shards.
@@ -571,13 +600,12 @@ func (kv *ShardKV) pullShards(nextNum int) error {
 		DPrintf("=====syncing group:%v,peer:%v,pullShardsReqReturn:%v toGid:%v, next:%v, prevNext:%v, current%v, state:%v", kv.gid, kv.me, mvArg.Shards, gid, nextCfg, prevNextConfig, kv.config.Num, shardsState)
 
 		updateShardsStateCmd := ReqArg{
-			Cid:            kv.cid,
-			Seq:            atomic.AddInt64(&kv.seq, 1),
-			Op:             OpUpdateShardsState,
-			FromGid:        kv.gid,
-			PrevNextConfig: mvArg.PrevNextConfig,
-			NextConfig:     mvArg.NextConfig,
-			State:          shardsState,
+			Cid:        kv.cid,
+			Seq:        atomic.AddInt64(&kv.seq, 1),
+			Op:         OpUpdateShardsState,
+			FromGid:    kv.gid,
+			NextConfig: mvArg.NextConfig,
+			State:      shardsState,
 		}
 		updateReply := updateShardsFn(&updateShardsStateCmd)
 
@@ -590,8 +618,8 @@ func (kv *ShardKV) pullShards(nextNum int) error {
 				- leader1 continue to update to C3, it will defintely fail, because leader1/2 isn't synced
 				- then leader1 is back and leader2 is still unsynced, leader1 will loop endlessly failing update to C3 due to C2 sync is skipped and it'll never be tried again.
 		*/
-		if updateReply.Err == ErrWrongLeader {
-			return errors.New(ErrWrongLeader)
+		if updateReply.Err == ErrWrongLeader || updateReply.Err == ErrAlreadyUpdated || updateReply.Err == ErrKilled {
+			return errors.New(string(updateReply.Err))
 		}
 	}
 	return nil
@@ -613,22 +641,6 @@ func (kv *ShardKV) syncToLatestCfg(currentCfg, latestCfg *shardctrler.Config, sy
 			// must skip following updates to avoid endless failure on later update due to the previous is unsynced.
 			return
 		}
-	}
-}
-
-// 类似于2C的活锁问题: 前一个leader刚发送startcmd，其他节点也收到了但是还没有提交就挂了；然后新leader被选举出来，但是在新term没有新的command，而raft只允许提交自己term的log，所以新leader会一直提交不了日志，导致无法推进config更新和shard同步。
-func (kv *ShardKV) keepRaftLeaderToLatest() {
-	for !kv.killed() {
-		isleader, leaderAppliedNewLog := kv.rf.AppliedNewLogInCurrentTerm()
-		if isleader && !leaderAppliedNewLog {
-			emptyReq := ReqArg{
-				Cid: kv.cid,
-				Seq: atomic.AddInt64(&kv.seq, 1),
-				Op:  OpEmpty,
-			}
-			kv.rf.Start(emptyReq)
-		}
-		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -702,12 +714,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 				if latestConfig.Num > currentNum || (latestConfig.Num == currentNum && !synced) {
 					if latestConfig.Num == 1 { // 初始配置，不需要从其他节点同步shards，直接更新到新shards
 						moveShardsArgs := ReqArg{
-							Cid:            kv.cid,
-							Seq:            atomic.AddInt64(&kv.seq, 1),
-							Op:             OpMoveShards,
-							FromGid:        kv.gid,
-							NextConfig:     latestConfig,
-							PrevNextConfig: currentConfig, // 必须在lock中读取，否则可能导致错误
+							Cid:        kv.cid,
+							Seq:        atomic.AddInt64(&kv.seq, 1),
+							Op:         OpMoveShards,
+							FromGid:    kv.gid,
+							NextConfig: latestConfig,
 						}
 						kv.rf.Start(moveShardsArgs)
 					} else {
@@ -720,8 +731,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	}()
 
 	go kv.applyCmds()
-
-	// go kv.keepRaftLeaderToLatest()
 
 	return kv
 }

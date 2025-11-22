@@ -137,15 +137,16 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 // return isleader, hasLeaderAppliedNewLogInCurrentTerm
-func (rf *Raft) AppliedNewLogInCurrentTerm() (bool, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	appliedNewLog := rf.LastIncludedTerm == rf.CurrentTerm
-	if len(rf.Log) > 0 {
-		appliedNewLog = rf.Log[len(rf.Log)-1].Term == rf.CurrentTerm
-	}
-	return rf.role == Leader, appliedNewLog
-}
+// no use
+// func (rf *Raft) AppliedNewLogInCurrentTerm() (bool, bool) {
+// 	rf.mu.Lock()
+// 	defer rf.mu.Unlock()
+// 	appliedNewLog := rf.LastIncludedTerm == rf.CurrentTerm
+// 	if len(rf.Log) > 0 {
+// 		appliedNewLog = rf.Log[len(rf.Log)-1].Term == rf.CurrentTerm
+// 	}
+// 	return rf.role == Leader, appliedNewLog
+// }
 
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -418,12 +419,12 @@ func (rf *Raft) sendAppendEntries(server int, args *RequestAppendEntry, reply *A
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
+
 	if ok && reply.Term > rf.CurrentTerm {
 		rf.CurrentTerm = reply.Term
 		rf.role = Follower
 		rf.VotedFor = -1
-
-		rf.persist()
 	}
 
 	if rf.role != Leader || !ok {
@@ -1117,6 +1118,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
+// for debug kvraft, here gid is provided for raft, others are the same as Make.
 func MakeWithGid(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg, gid int, debug bool) *Raft {
 	rf := &Raft{}

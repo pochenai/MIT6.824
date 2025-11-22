@@ -256,3 +256,6 @@ func sync(Cn):
 
 #### 一些小细节
 - restoreState的kv.avaliable需要先初始化，否则会merge上次的config，而不单单是重置读取到的，如果不初始化会出现unexpected behavior.
+- pullShards的时候需要注意这里面是一个循环，如果kv.killed之后需要退出，否则会导致主进程退出后子进程依然再run，出现undefined behavior影响下一次测试(这个bug找了很久才找到!)
+- shardctrler.Client.Query里面也是一个循环，如果节点被killed之后会一直在里面死循环不退出，导致GC没法回收内存OOM，需要设置超时后直接返回默认值(应该返回错误更好，就没管了)
+- lab4B TestStaticShards测试本身有个bug导致测试多轮会OOM，需要把channel 改成non-blocking的

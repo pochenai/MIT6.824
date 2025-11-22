@@ -1,21 +1,25 @@
 package shardkv
 
-import "6.824/shardctrler"
-import "6.824/labrpc"
-import "testing"
-import "os"
+import (
+	"os"
+	"testing"
 
-// import "log"
-import crand "crypto/rand"
-import "math/big"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "6.824/raft"
-import "strconv"
-import "fmt"
-import "time"
+	"6.824/labrpc"
+	"6.824/shardctrler"
+
+	// import "log"
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"math/rand"
+	"runtime"
+	"strconv"
+	"sync"
+	"time"
+
+	"6.824/raft"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -72,6 +76,7 @@ type config struct {
 func (cfg *config) checkTimeout() {
 	// enforce a two minute real-time limit on each test
 	if !cfg.t.Failed() && time.Since(cfg.start) > 120*time.Second {
+		panic("test took longer than 120 seconds")
 		cfg.t.Fatal("test took longer than 120 seconds")
 	}
 }

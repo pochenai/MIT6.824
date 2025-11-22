@@ -44,17 +44,21 @@ func (ck *Clerk) Query(num int) Config {
 	}
 	// Your code here.
 	args.Num = num
-	for {
+	start := time.Now()
+	// use timeouts to handle killed shardctrler (e.g static testing), or this cmd will loop infinitely and never return, which causes OOM if run it multiple rounds.
+	for time.Since(start) < 10*time.Second {
 		var reply QueryReply
 		ok := ck.servers[ck.leader].Call("ShardCtrler.Query", args, &reply)
 		if ok && reply.Err == "" {
 			return reply.Config
 		}
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrRetry {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 		}
 	}
+	// the server must has been killed, so we return a dummy config.
+	return Config{Num: -1}
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
@@ -73,7 +77,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 			return
 		}
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrRetry {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 		}
 	}
@@ -94,7 +98,7 @@ func (ck *Clerk) Leave(gids []int) {
 			return
 		}
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrRetry {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 		}
 	}
@@ -116,7 +120,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 			return
 		}
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrRetry {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 		}
 	}

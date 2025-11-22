@@ -70,6 +70,7 @@ const (
 	OK             = "OK"
 	ErrRetry       = "ErrRetry"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrKilled      = "ErrKilled"
 )
 
 type Operation int

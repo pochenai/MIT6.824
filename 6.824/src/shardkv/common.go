@@ -16,7 +16,7 @@ import (
 // You will have to modify these definitions.
 //
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -61,6 +61,9 @@ const (
 	ErrWaitingSyncShard = "ErrWaitingSyncShard"
 	ErrRetry            = "ErrRetry"
 	ErrReqOutdated      = "ErrReqOutdated"
+	ErrAlreadyUpdated   = "ErrAlreadyUpdated"
+	ErrKilled           = "ErrKilled"
+	ErrCtrlerKilled     = "ErrCtrlerKilled"
 )
 
 type Err string
@@ -105,11 +108,10 @@ type ReqArg struct {
 	Op    Operation
 
 	// for OpMoveShards, OpUpdateShardsState
-	FromGid        int
-	PrevNextConfig shardctrler.Config // for both
-	NextConfig     shardctrler.Config // only for OpUpdateShardsState
-	Shards         []int              // only for OpMoveShards
-	State          map[int]ShardState // only for OpUpdateShardsState
+	FromGid    int
+	NextConfig shardctrler.Config // for OpMoveShards and OpUpdateShardsState
+	Shards     []int              // only for OpMoveShards
+	State      map[int]ShardState // only for OpUpdateShardsState
 }
 
 type Reply struct {
