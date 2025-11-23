@@ -7,3 +7,4 @@
 - https://github.com/OneSizeFitsQuorum/MIT6.824-2021
 - [schedule and papers](http://nil.lcs.mit.edu/6.824/2020/schedule.html)
 - [2021 labs](http://nil.lcs.mit.edu/6.824/2021/labs/lab-raft.html)
+- [Raft optimization by PingCAP](https://cn.pingcap.com/blog/optimizing-raft-in-tikv/)
